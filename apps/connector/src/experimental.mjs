@@ -42,8 +42,9 @@ async function connect() {
       state.qr = null;
       const code = update.lastDisconnect?.error?.output?.statusCode;
       state.status = code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
-      state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada');
+      state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
+      if (code !== DisconnectReason.loggedOut) setTimeout(() => { if (!socket && state.status === 'RECONNECTING') connect().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
     }
   });
   socket.ev.on('messages.upsert', ({ messages }) => {
