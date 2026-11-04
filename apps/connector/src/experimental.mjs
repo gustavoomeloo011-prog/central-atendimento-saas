@@ -79,7 +79,7 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/auto-reply') {
     const input = await parse(request);
-    state.autoReplyEnabled = Boolean(input.enabled) && allowedNumbers.size > 0;
+    state.autoReplyEnabled = Boolean(input.enabled) && state.status === 'CONNECTED';
     return json(response, 200, publicState());
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/authorize') {
