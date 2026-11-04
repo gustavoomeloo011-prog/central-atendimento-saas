@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+apps/connector/sessions/
+apps/connector/*.log
+*.log
+.render/

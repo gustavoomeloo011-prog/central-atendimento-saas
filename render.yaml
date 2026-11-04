@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: central-atendimento-demo
+    runtime: node
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile
+    startCommand: pnpm dev
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_PATH
+        value: /tmp/central-atendimento.db
+      - key: WHATSAPP_CONNECTOR_URL
+        sync: false
+      - key: WHATSAPP_CONNECTOR_TOKEN
+        sync: false
