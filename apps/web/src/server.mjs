@@ -100,8 +100,16 @@ const server = createServer(async (request, response) => {
       db.prepare('update conversations set status=?,bot_attempts=?,updated_at=? where id=?').run('open', inboundCount, now, conversation.id);
       reply = settings.welcome_message;
     }
-    if (reply) db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, conversation.id, null, reply, 'outbound', now);
     return respond(response, 201, { ok: true, conversation_id: conversation.id, reply, queued: Boolean(financial || reachedLimit) });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/outbound') {
+    if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return respond(response, 401, { error: 'Conector não autorizado.' });
+    const input = await parseBody(request); const companyId = String(input.company_id || process.env.WHATSAPP_COMPANY_ID || 'isp'); const conversationId = String(input.conversation_id || ''); const body = String(input.body || '').trim();
+    if (!conversationId || !body) return respond(response, 400, { error: 'Conversa e mensagem são obrigatórias.' });
+    const now = new Date().toISOString(); const messageId = randomUUID();
+    db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(messageId, companyId, conversationId, null, body, 'outbound', now);
+    db.prepare('update conversations set updated_at=? where id=? and company_id=?').run(now, conversationId, companyId);
+    return respond(response, 201, { ok: true, message_id: messageId, delivery: 'sent' });
   }
   const session = getSession(request);
   if (!session) return respond(response, 401, { error: 'Sessão expirada.' });
@@ -204,7 +212,7 @@ const server = createServer(async (request, response) => {
   const selected = getConversation(session, id);
   if (!selected) return respond(response, 404, { error: 'Conversa não encontrada.' });
   if (request.method === 'GET' && pieces.length === 3) {
-    const messages = db.prepare("select m.*,coalesce(p.name,'Cliente') || ' · ' || substr(m.created_at,12,5) author_name from messages m left join profiles p on p.id=m.profile_id where m.conversation_id=? and m.company_id=? order by m.created_at").all(id, companyId);
+    const messages = db.prepare("select m.*,coalesce(p.name,'Cliente') || ' · ' || substr(m.created_at,12,5) || case when m.direction='outbound' then ' · ✓✓' else '' end author_name from messages m left join profiles p on p.id=m.profile_id where m.conversation_id=? and m.company_id=? order by m.created_at").all(id, companyId);
     return respond(response, 200, { conversation: selected, messages });
   }
   const action = pieces[3];

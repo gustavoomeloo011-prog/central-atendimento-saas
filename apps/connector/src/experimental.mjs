@@ -56,7 +56,10 @@ async function connect() {
       if (!body || !connectorToken) continue;
       fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body }) }).then(response => response.json()).then(async result => {
         console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
-        if (state.autoReplyEnabled && result.reply) await socket.sendMessage(jid, { text: result.reply });
+        if (state.autoReplyEnabled && result.reply) {
+          const sent = await socket.sendMessage(jid, { text: result.reply });
+          await fetch(centralApiUrl + '/api/internal/whatsapp/outbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, conversation_id: result.conversation_id, body: result.reply, message_id: sent?.key?.id }) });
+        }
       }).catch(error => console.error(JSON.stringify({ type: 'bridge_error', sender, error: error.message })));
     }
   });
