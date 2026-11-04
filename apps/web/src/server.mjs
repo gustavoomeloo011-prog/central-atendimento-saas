@@ -21,7 +21,9 @@ const columns = db.prepare('pragma table_info(conversations)').all().map(column 
 if (!columns.includes('queue_type')) db.exec("alter table conversations add column queue_type text not null default 'support'");
 if (!columns.includes('bot_attempts')) db.exec("alter table conversations add column bot_attempts integer not null default 0");
 db.exec('create table if not exists automation_settings(company_id text primary key,welcome_message text not null,fallback_message text not null,max_attempts integer not null);' +
-  'create table if not exists quick_replies(id text primary key,company_id text not null,shortcut text not null,body text not null,department_id text);');
+  'create table if not exists quick_replies(id text primary key,company_id text not null,shortcut text not null,body text not null,department_id text);' +
+  'create table if not exists automation_flows(id text primary key,company_id text not null,name text not null,status text not null default \'draft\',published_version integer,created_at text not null,updated_at text not null);' +
+  'create table if not exists automation_flow_versions(id text primary key,flow_id text not null,version integer not null,status text not null,definition text not null,created_at text not null,published_at text);');
 if (!db.prepare('select count(*) total from companies').get().total) {
   const now = new Date().toISOString();
   const quote = value => "'" + String(value).replaceAll("'", "''") + "'";
@@ -104,6 +106,7 @@ const server = createServer(async (request, response) => {
   const session = getSession(request);
   if (!session) return respond(response, 401, { error: 'Sessão expirada.' });
   const companyId = session.profile.company_id;
+  const pieces = url.pathname.split('/').filter(Boolean);
   if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
     const conversations = db.prepare('select c.*,d.name department_name,p.name assignee_name,(select body from messages m where m.conversation_id=c.id order by created_at desc limit 1) last_message from conversations c join departments d on d.id=c.department_id left join profiles p on p.id=c.assigned_profile_id where c.company_id=? order by case c.status when \'waiting\' then 0 else 1 end,c.updated_at desc').all(companyId);
     return respond(response, 200, { profile: session.profile, company: db.prepare('select * from companies where id=?').get(companyId), conversations, departments: db.prepare('select * from departments where company_id=?').all(companyId), quickReplies: db.prepare('select * from quick_replies where company_id=? order by shortcut').all(companyId) });
@@ -162,7 +165,40 @@ const server = createServer(async (request, response) => {
     event(session, 'quick_reply_created', 'quick_reply');
     return respond(response, 201, { ok: true });
   }
-  const pieces = url.pathname.split('/').filter(Boolean);
+  if (request.method === 'GET' && url.pathname === '/api/flows') {
+    return respond(response, 200, { flows: db.prepare('select * from automation_flows where company_id=? order by updated_at desc').all(companyId) });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/flows') {
+    if (!canManage) return respond(response, 403, { error: 'Somente supervisor ou administrador pode criar fluxos.' });
+    const input = await parseBody(request); const name = String(input.name || '').trim();
+    if (!name) return respond(response, 400, { error: 'Informe o nome do fluxo.' });
+    const now = new Date().toISOString(); const flowId = randomUUID(); const versionId = randomUUID();
+    const definition = JSON.stringify(input.definition || { nodes: [{ id: 'start', type: 'menu', title: 'Início', message: '', options: [] }], edges: [] });
+    db.prepare('insert into automation_flows values(?,?,?,?,?,?,?)').run(flowId, companyId, name, 'draft', null, now, now);
+    db.prepare('insert into automation_flow_versions values(?,?,?,?,?,?,?)').run(versionId, flowId, 1, 'draft', definition, now, null);
+    return respond(response, 201, { id: flowId, version: 1 });
+  }
+  if (pieces?.[0] === 'api' && pieces[1] === 'flows' && pieces[2]) {
+    const flow = db.prepare('select * from automation_flows where id=? and company_id=?').get(pieces[2], companyId);
+    if (!flow) return respond(response, 404, { error: 'Fluxo não encontrado.' });
+    if (request.method === 'GET') return respond(response, 200, { flow, versions: db.prepare('select * from automation_flow_versions where flow_id=? order by version desc').all(flow.id) });
+    if (!canManage) return respond(response, 403, { error: 'Sem permissão para editar fluxos.' });
+    if (request.method === 'POST' && pieces[3] === 'publish') {
+      db.prepare("update automation_flow_versions set status='archived' where flow_id=? and status='published'").run(flow.id);
+      const version = db.prepare('select coalesce(max(version),0)+1 version from automation_flow_versions where flow_id=?').get(flow.id).version;
+      const input = await parseBody(request); const now = new Date().toISOString();
+      db.prepare('insert into automation_flow_versions values(?,?,?,?,?,?,?)').run(randomUUID(), flow.id, version, 'published', JSON.stringify(input.definition || {}), now, now);
+      db.prepare('update automation_flows set status=?,published_version=?,updated_at=? where id=?').run('published', version, now, flow.id);
+      return respond(response, 200, { ok: true, version });
+    }
+    if (request.method === 'PUT') {
+      const input = await parseBody(request); const now = new Date().toISOString();
+      const version = db.prepare('select coalesce(max(version),0)+1 version from automation_flow_versions where flow_id=?').get(flow.id).version;
+      db.prepare('insert into automation_flow_versions values(?,?,?,?,?,?,?)').run(randomUUID(), flow.id, version, 'draft', JSON.stringify(input.definition || {}), now, null);
+      db.prepare('update automation_flows set updated_at=? where id=?').run(now, flow.id);
+      return respond(response, 200, { ok: true, version });
+    }
+  }
   if (pieces[0] !== 'api' || pieces[1] !== 'conversations') return respond(response, 404, { error: 'Rota não encontrada.' });
   const id = pieces[2];
   const selected = getConversation(session, id);
