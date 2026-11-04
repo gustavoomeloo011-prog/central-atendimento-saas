@@ -133,10 +133,11 @@ function bindConversation(conversation) {
   const composer = document.querySelector('#send');
   if (composer && !quickToggle) {
     const dock = document.createElement('div'); dock.className = 'quickDock';
-    dock.innerHTML = '<button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette">' + (state.quickReplies || []).map(reply => '<button class="quick" data-quick="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('') + '</div>';
+    dock.innerHTML = '<button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette"><input class="quickSearch" id="quickSearch" placeholder="🔎 Pesquisar mensagem rápida"><div class="quickResults">' + (state.quickReplies || []).map(reply => '<button class="quick" data-title="' + esc(reply.shortcut + ' ' + reply.body) + '" data-quick="' + esc(reply.shortcut) + '"><b>' + esc(reply.shortcut) + '</b><span>' + esc(reply.body) + '</span></button>').join('') + '</div></div>';
     composer.prepend(dock);
     dock.querySelector('#quickToggle').onclick = () => dock.querySelector('#quickPalette').classList.toggle('visible');
     dock.querySelectorAll('[data-quick]').forEach(button => button.onclick = () => useQuick(button.dataset.quick));
+    dock.querySelector('#quickSearch').oninput = event => { const term = event.target.value.toLowerCase(); dock.querySelectorAll('[data-quick]').forEach(button => { button.hidden = !button.dataset.title.toLowerCase().includes(term); }); };
   }
   document.querySelector('#send').onsubmit = async event => {
     event.preventDefault();
