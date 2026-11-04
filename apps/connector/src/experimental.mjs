@@ -51,7 +51,6 @@ async function connect() {
       const jid = message.key?.remoteJid;
       const sender = numberFromJid(jid);
       if (!sender || message.key?.fromMe || jid?.endsWith('@g.us') || jid === 'status@broadcast') continue;
-      if (!allowedNumbers.has(sender)) continue;
       const body = message.message?.conversation || message.message?.extendedTextMessage?.text || message.message?.imageMessage?.caption || '';
       if (!body || !connectorToken) continue;
       fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body }) }).then(response => response.json()).then(async result => {
@@ -85,6 +84,14 @@ const server = createServer(async (request, response) => {
     if (!number) return json(response, 400, { error: 'Informe um número.' });
     allowedNumbers.add(number);
     return json(response, 200, publicState());
+  }
+  if (request.method === 'POST' && url.pathname === '/api/whatsapp/send') {
+    if (request.headers['x-connector-token'] !== connectorToken) return json(response, 401, { error: 'Conector não autorizado.' });
+    const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
+    if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
+    if (!phone || !text) return json(response, 400, { error: 'Telefone e texto são obrigatórios.' });
+    const jid = phone + '@s.whatsapp.net'; const result = await socket.sendMessage(jid, { text });
+    return json(response, 200, { ok: true, messageId: result?.key?.id || null });
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/disconnect') {
     if (socket) { socket.end(undefined); socket = null; }
