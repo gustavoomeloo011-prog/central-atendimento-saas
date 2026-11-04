@@ -2,6 +2,7 @@ const app = document.querySelector('#app');
 let token = localStorage.getItem('central_token');
 let state = {};
 let activeId = null;
+let menuClosed = localStorage.getItem('central_menu_closed') === '1';
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -14,6 +15,7 @@ const api = async (path, options = {}) => {
 };
 const esc = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const formatPhone = value => { const digits = String(value || '').replace(/\D/g, '').slice(0, 13); if (digits.length <= 2) return digits ? '+' + digits : ''; if (digits.length <= 4) return '+' + digits.slice(0, 2) + ' (' + digits.slice(2); if (digits.length <= 9) return '+' + digits.slice(0, 2) + ' (' + digits.slice(2, 4) + ') ' + digits.slice(4); return '+' + digits.slice(0, 2) + ' (' + digits.slice(2, 4) + ') ' + digits.slice(4, 9) + '-' + digits.slice(9); };
+const timeOf = value => { const date = new Date(value); return Number.isNaN(date.valueOf()) ? '' : date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); };
 const supervisor = () => ['supervisor', 'company_admin', 'superadmin'].includes(state.profile?.role);
 
 function login() {
@@ -71,7 +73,8 @@ function render() {
 }
 
 function bindShell() {
-  document.querySelector('#menuToggle').onclick = () => document.querySelector('.shell').classList.toggle('menuClosed');
+  document.querySelector('.shell').classList.toggle('menuClosed', menuClosed);
+  document.querySelector('#menuToggle').onclick = () => { menuClosed = !menuClosed; localStorage.setItem('central_menu_closed', menuClosed ? '1' : '0'); document.querySelector('.shell').classList.toggle('menuClosed', menuClosed); };
   document.querySelector('#logout').onclick = () => { localStorage.removeItem('central_token'); token = null; login(); };
   document.querySelector('#inbox').onclick = render;
   document.querySelector('#queues').onclick = () => openPanel('queues');

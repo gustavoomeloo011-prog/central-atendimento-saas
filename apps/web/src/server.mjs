@@ -168,7 +168,7 @@ const server = createServer(async (request, response) => {
   const selected = getConversation(session, id);
   if (!selected) return respond(response, 404, { error: 'Conversa não encontrada.' });
   if (request.method === 'GET' && pieces.length === 3) {
-    const messages = db.prepare('select m.*,p.name author_name from messages m left join profiles p on p.id=m.profile_id where m.conversation_id=? and m.company_id=? order by m.created_at').all(id, companyId);
+    const messages = db.prepare("select m.*,coalesce(p.name,'Cliente') || ' · ' || substr(m.created_at,12,5) author_name from messages m left join profiles p on p.id=m.profile_id where m.conversation_id=? and m.company_id=? order by m.created_at").all(id, companyId);
     return respond(response, 200, { conversation: selected, messages });
   }
   const action = pieces[3];
