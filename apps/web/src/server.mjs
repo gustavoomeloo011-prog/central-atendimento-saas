@@ -46,6 +46,7 @@ const parseBody = request => new Promise((resolve, reject) => { let raw = ''; re
 const getSession = request => sessions.get((request.headers.authorization || '').replace('Bearer ', ''));
 const getConversation = (session, id) => db.prepare('select * from conversations where id=? and company_id=?').get(id, session.profile.company_id);
 const event = (session, action, id) => db.prepare('insert into audit_events values(?,?,?,?,?,?,?)').run(randomUUID(), session.profile.company_id, session.profile.id, action, 'conversation', id, new Date().toISOString());
+const connectorToken = process.env.WHATSAPP_CONNECTOR_TOKEN || '';
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
@@ -66,6 +67,39 @@ const server = createServer(async (request, response) => {
     const token = randomUUID();
     sessions.set(token, { profile });
     return respond(response, 200, { token, profile: { name: profile.name, role: profile.role } });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/inbound') {
+    if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return respond(response, 401, { error: 'Conector não autorizado.' });
+    const input = await parseBody(request);
+    const companyId = String(input.company_id || process.env.WHATSAPP_COMPANY_ID || 'isp');
+    const phone = String(input.phone || '').replace(/\D/g, '');
+    const body = String(input.body || '').trim();
+    if (!phone || !body) return respond(response, 400, { error: 'Telefone e mensagem são obrigatórios.' });
+    const now = new Date().toISOString();
+    let conversation = db.prepare('select * from conversations where company_id=? and contact_phone=? order by updated_at desc limit 1').get(companyId, phone);
+    if (!conversation) {
+      const department = db.prepare('select id from departments where company_id=? order by id limit 1').get(companyId);
+      if (!department) return respond(response, 409, { error: 'A empresa não possui fila configurada.' });
+      const id = 'wa-' + phone;
+      db.prepare('insert into conversations(id,company_id,department_id,assigned_profile_id,contact_name,contact_phone,subject,status,priority,created_at,updated_at,queue_type,bot_attempts) values(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, companyId, department.id, null, input.name || phone, phone, 'WhatsApp', 'waiting', 'normal', now, now, department.id, 0);
+      conversation = db.prepare('select * from conversations where id=?').get(id);
+    }
+    const settings = db.prepare('select * from automation_settings where company_id=?').get(companyId);
+    const inboundCount = db.prepare("select count(*) total from messages where conversation_id=? and direction='inbound'").get(conversation.id).total + 1;
+    db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, conversation.id, null, body, 'inbound', now);
+    const financial = /financeiro|fatura|segunda via|boleto/i.test(body);
+    const reachedLimit = settings && inboundCount >= settings.max_attempts;
+    let reply = null;
+    if (settings && (financial || reachedLimit)) {
+      const target = financial ? db.prepare("select id from departments where company_id=? and lower(name) like '%financeiro%' limit 1").get(companyId) : null;
+      db.prepare('update conversations set department_id=?,status=?,bot_attempts=?,updated_at=? where id=?').run(target?.id || conversation.department_id, 'waiting', inboundCount, now, conversation.id);
+      reply = settings.fallback_message;
+    } else if (settings) {
+      db.prepare('update conversations set status=?,bot_attempts=?,updated_at=? where id=?').run('open', inboundCount, now, conversation.id);
+      reply = settings.welcome_message;
+    }
+    if (reply) db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, conversation.id, null, reply, 'outbound', now);
+    return respond(response, 201, { ok: true, conversation_id: conversation.id, reply, queued: Boolean(financial || reachedLimit) });
   }
   const session = getSession(request);
   if (!session) return respond(response, 401, { error: 'Sessão expirada.' });

@@ -7,6 +7,9 @@ import QRCode from 'qrcode';
 const port = Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200);
 const sessionDirectory = process.env.WHATSAPP_SESSION_DIR || join(process.cwd(), 'apps', 'connector', 'sessions');
 const allowedNumbers = new Set(String(process.env.WHATSAPP_ALLOWED_NUMBERS || '').split(',').map(value => value.replace(/\D/g, '')).filter(Boolean));
+const centralApiUrl = String(process.env.CENTRAL_API_URL || 'http://localhost:3100').replace(/\/$/, '');
+const connectorToken = String(process.env.WHATSAPP_CONNECTOR_TOKEN || '');
+const companyId = String(process.env.WHATSAPP_COMPANY_ID || 'isp');
 const state = { status: 'disconnected', qr: null, phone: null, lastError: null, autoReplyEnabled: false, connectedAt: null };
 let socket = null;
 
@@ -47,9 +50,12 @@ async function connect() {
       const sender = numberFromJid(jid);
       if (!sender || message.key?.fromMe || jid?.endsWith('@g.us') || jid === 'status@broadcast') continue;
       if (!allowedNumbers.has(sender)) continue;
-      console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id }));
-      // A próxima etapa envia este evento ao motor central autenticado.
-      // Nenhuma resposta automática sai enquanto autoReplyEnabled estiver falso.
+      const body = message.message?.conversation || message.message?.extendedTextMessage?.text || message.message?.imageMessage?.caption || '';
+      if (!body || !connectorToken) continue;
+      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body }) }).then(response => response.json()).then(async result => {
+        console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
+        if (state.autoReplyEnabled && result.reply) await socket.sendMessage(jid, { text: result.reply });
+      }).catch(error => console.error(JSON.stringify({ type: 'bridge_error', sender, error: error.message })));
     }
   });
 }
