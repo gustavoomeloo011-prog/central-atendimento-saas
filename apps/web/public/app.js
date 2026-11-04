@@ -51,7 +51,7 @@ async function openConversation(id) {
 }
 
 function shell(content, title = 'Caixa de entrada') {
-  return '<div class="shell"><aside class="side"><span class="tag">SIMULADOR</span><h2>Central</h2><p class="muted">' + esc(state.company.name) + '</p><div class="nav"><button class="navButton" id="inbox">◉ Caixa de entrada</button><button class="navButton" id="queues">◌ Filas</button><button class="navButton" id="team">◌ Equipe</button><button class="navButton" id="automations">◌ Automações</button><button class="navButton" id="indicators">◌ Indicadores</button><button class="navButton" id="settings">◌ Configurações</button><button class="btn subtle" id="logout">Sair</button></div></aside><header class="top"><div><b>' + title + '</b> <span class="muted">· ' + esc(state.company.name) + '</span></div><div>' + esc(state.profile.name) + ' <span class="tag">' + esc(state.profile.role) + '</span></div></header>' + content + '</div>';
+  return '<div class="shell"><aside class="side"><span class="tag">SIMULADOR</span><h2>Central</h2><p class="muted">' + esc(state.company.name) + '</p><div class="nav"><button class="navButton" id="inbox">◉ Caixa de entrada</button><button class="navButton" id="queues">◌ Filas</button><button class="navButton" id="team">◌ Equipe</button><button class="navButton" id="automations">◌ Automações</button><button class="navButton" id="indicators">◌ Indicadores</button><button class="navButton" id="settings">◌ Configurações</button><button class="btn subtle" id="logout">Sair</button></div></aside><header class="top"><button class="menuToggle" id="menuToggle" aria-label="Abrir ou fechar menu">☰</button><div><b>' + title + '</b> <span class="muted">· ' + esc(state.company.name) + '</span></div><div>' + esc(state.profile.name) + ' <span class="tag">' + esc(state.profile.role) + '</span></div></header>' + content + '</div>';
 }
 
 function render() {
@@ -71,6 +71,7 @@ function render() {
 }
 
 function bindShell() {
+  document.querySelector('#menuToggle').onclick = () => document.querySelector('.shell').classList.toggle('menuClosed');
   document.querySelector('#logout').onclick = () => { localStorage.removeItem('central_token'); token = null; login(); };
   document.querySelector('#inbox').onclick = render;
   document.querySelector('#queues').onclick = () => openPanel('queues');
