@@ -4,6 +4,7 @@ let token = localStorage.getItem('central_token');
 let state = {};
 let activeId = null;
 let menuClosed = localStorage.getItem('central_menu_closed') === '1';
+let inboxMode = 'general';
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -59,6 +60,7 @@ function shell(content, title = 'Caixa de entrada') {
 
 function render() {
   const list = [...(state.conversations || [])].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
+  const visibleList = list.filter(item => inboxMode === 'general' ? (!item.assigned_profile_id && item.status !== 'closed') : item.assigned_profile_id === state.profile.id);
   const conversation = list.find(item => item.id === activeId);
   const messages = state.detail?.conversation?.id === activeId ? state.detail.messages : [];
   const inbox = '<section class="list"><div class="toolbar"><span class="tag">FILA ' + list.filter(item => item.status === 'waiting').length + '</span><button class="btn subtle" id="refresh">Atualizar</button></div>' + list.map(item => '<article class="conversation ' + (item.id === activeId ? 'active' : '') + '" data-id="' + item.id + '"><b>' + esc(item.contact_name) + '</b> <span class="tag ' + item.status + '">' + esc(item.status) + '</span><div class="muted">' + esc(item.last_message || item.subject) + '</div><small>' + esc(item.department_name) + ' · ' + esc(item.contact_phone) + '</small></article>').join('') + '</section>';
@@ -67,6 +69,14 @@ function render() {
   const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox"><span class="tag">SGP</span><h3>Dados do cliente</h3><p class="muted">Quando o cadastro não for localizado no SGP, os campos permanecem nulos e este atendimento pode ser tratado como uma nova contratação.</p><dl class="clientData"><dt>Contrato</dt><dd>Não informado</dd><dt>Endereço</dt><dd>Não informado</dd><dt>Plano</dt><dd>Não informado</dd></dl><a class="btn" href="https://cadastro.sgfibra.com.br" target="_blank" rel="noopener">Abrir cadastro SG Fibra</a></div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
   const chat = conversation ? '<section class="chat"><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span></div><div><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="quickRow"><span class="muted">Mensagens rápidas</span>' + shortcuts + '</div><div class="messages">' + messages.map(message => '<div class="message ' + (message.direction === 'outbound' ? 'outbound' : '') + '">' + esc(message.body) + '<small>' + esc(message.author_name || 'Cliente') + '</small></div>').join('') + '</div><form class="composer" id="send"><textarea name="body" placeholder="Escreva uma mensagem simulada"></textarea><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
   app.innerHTML = shell(inbox + chat + client);
+  const listToolbar = document.querySelector('.list .toolbar');
+  if (listToolbar) {
+    const mode = document.createElement('div'); mode.className = 'inboxModes'; mode.innerHTML = '<button class="btn subtle" type="button">Geral</button><button class="btn subtle" type="button">Meus</button>';
+    mode.children[0].onclick = () => { inboxMode = 'general'; render(); };
+    mode.children[1].onclick = () => { inboxMode = 'mine'; render(); };
+    listToolbar.prepend(mode);
+    document.querySelectorAll('.conversation').forEach(card => { const item = list.find(entry => entry.id === card.dataset.id); card.hidden = inboxMode === 'general' ? Boolean(item?.assigned_profile_id || item?.status === 'closed') : item?.assigned_profile_id !== state.profile.id; });
+  }
   const brand = document.querySelector('.side h2'); if (brand) brand.textContent = 'Atendimento SG Fibra';
   bindShell();
   document.querySelector('#refresh').onclick = boot;

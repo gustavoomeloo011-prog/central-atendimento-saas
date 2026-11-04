@@ -251,7 +251,8 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && action === 'transfer') {
     const department = db.prepare('select * from departments where id=? and company_id=?').get(input.department_id, companyId);
     if (!department) return respond(response, 400, { error: 'Setor inválido.' });
-    db.prepare('update conversations set department_id=?,assigned_profile_id=null,status=?,updated_at=? where id=?').run(department.id, 'waiting', now, id);
+    const assignee = input.assigned_profile_id ? db.prepare('select id from profiles where id=? and company_id=?').get(input.assigned_profile_id, companyId) : null;
+    db.prepare('update conversations set department_id=?,assigned_profile_id=?,status=?,updated_at=? where id=?').run(department.id, assignee?.id || null, 'waiting', now, id);
     event(session, 'conversation_transferred', id);
     return respond(response, 200, { ok: true });
   }
