@@ -10,36 +10,38 @@ const allowedNumbers = new Set(String(process.env.WHATSAPP_ALLOWED_NUMBERS || ''
 const centralApiUrl = String(process.env.CENTRAL_API_URL || 'http://localhost:3100').replace(/\/$/, '');
 const connectorToken = String(process.env.WHATSAPP_CONNECTOR_TOKEN || '');
 const companyId = String(process.env.WHATSAPP_COMPANY_ID || 'isp');
-const state = { status: 'disconnected', qr: null, phone: null, lastError: null, autoReplyEnabled: false, connectedAt: null };
+const state = { status: 'DISCONNECTED', qr: null, phone: null, profileName: null, lastError: null, autoReplyEnabled: false, connectedAt: null, syncStatus: 'idle' };
 let socket = null;
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
 const parse = request => new Promise(resolve => { let raw = ''; request.on('data', chunk => raw += chunk); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } }); });
 const numberFromJid = jid => String(jid || '').split('@')[0].replace(/\D/g, '');
-const publicState = () => ({ status: state.status, qr: state.qr, phone: state.phone, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, allowedCount: allowedNumbers.size });
+const publicState = () => ({ status: state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size });
 
 async function connect() {
   await mkdir(sessionDirectory, { recursive: true });
   const auth = await useMultiFileAuthState(sessionDirectory);
-  state.status = auth.state.creds.registered ? 'connecting' : 'waiting_qr';
+  state.status = auth.state.creds.registered ? 'CONNECTING' : 'QR_PENDING';
   state.lastError = null;
   socket = makeWASocket({ auth: auth.state, printQRInTerminal: false, browser: ['Central Experimental', 'Chrome', '1.0.0'] });
   socket.ev.on('creds.update', auth.saveCreds);
   socket.ev.on('connection.update', async update => {
     if (update.qr) {
-      state.status = 'waiting_qr';
+      state.status = 'QR_PENDING';
       state.qr = await QRCode.toDataURL(update.qr, { errorCorrectionLevel: 'M', margin: 2, width: 300 });
     }
     if (update.connection === 'open') {
-      state.status = 'connected';
+      state.status = 'CONNECTED';
       state.qr = null;
       state.phone = socket.user?.id ? numberFromJid(socket.user.id) : null;
+      state.profileName = socket.user?.name || null;
       state.connectedAt = new Date().toISOString();
+      state.syncStatus = 'new_messages_only';
     }
     if (update.connection === 'close') {
       state.qr = null;
       const code = update.lastDisconnect?.error?.output?.statusCode;
-      state.status = code === DisconnectReason.loggedOut ? 'disconnected' : 'reconnecting';
+      state.status = code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
       state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada');
       socket = null;
     }
@@ -86,13 +88,13 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/disconnect') {
     if (socket) { socket.end(undefined); socket = null; }
-    state.status = 'disconnected'; state.qr = null; state.phone = null; state.autoReplyEnabled = false;
+    state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false;
     return json(response, 200, publicState());
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/logout-and-delete-session') {
     if (socket) { socket.logout(); socket = null; }
     await rm(sessionDirectory, { recursive: true, force: true });
-    state.status = 'disconnected'; state.qr = null; state.phone = null; state.autoReplyEnabled = false;
+    state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false;
     return json(response, 200, publicState());
   }
   json(response, 404, { error: 'Rota não encontrada.' });

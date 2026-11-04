@@ -1,4 +1,5 @@
 const app = document.querySelector('#app');
+document.title = 'Atendimento SG Fibra';
 let token = localStorage.getItem('central_token');
 let state = {};
 let activeId = null;
@@ -66,6 +67,7 @@ function render() {
   const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox"><span class="tag">SGP</span><h3>Dados do cliente</h3><p class="muted">Quando o cadastro não for localizado no SGP, os campos permanecem nulos e este atendimento pode ser tratado como uma nova contratação.</p><dl class="clientData"><dt>Contrato</dt><dd>Não informado</dd><dt>Endereço</dt><dd>Não informado</dd><dt>Plano</dt><dd>Não informado</dd></dl><a class="btn" href="https://cadastro.sgfibra.com.br" target="_blank" rel="noopener">Abrir cadastro SG Fibra</a></div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
   const chat = conversation ? '<section class="chat"><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span></div><div><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="quickRow"><span class="muted">Mensagens rápidas</span>' + shortcuts + '</div><div class="messages">' + messages.map(message => '<div class="message ' + (message.direction === 'outbound' ? 'outbound' : '') + '">' + esc(message.body) + '<small>' + esc(message.author_name || 'Cliente') + '</small></div>').join('') + '</div><form class="composer" id="send"><textarea name="body" placeholder="Escreva uma mensagem simulada"></textarea><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
   app.innerHTML = shell(inbox + chat + client);
+  const brand = document.querySelector('.side h2'); if (brand) brand.textContent = 'Atendimento SG Fibra';
   bindShell();
   document.querySelector('#refresh').onclick = boot;
   document.querySelectorAll('.conversation').forEach(element => element.onclick = () => openConversation(element.dataset.id));
@@ -222,7 +224,7 @@ async function whatsapp() {
     const numberInput = document.querySelector('#allow [name=number]');
     numberInput.oninput = () => { numberInput.value = formatPhone(numberInput.value); };
     document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await fetch('http://localhost:3200/api/whatsapp/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); };
-    if (status.status === 'waiting_qr' || status.status === 'connecting' || status.status === 'reconnecting') setTimeout(whatsapp, 1200);
+    if (status.status === 'QR_PENDING' || status.status === 'CONNECTING' || status.status === 'RECONNECTING') setTimeout(whatsapp, 1200);
   };
   try { draw(await getStatus()); } catch { app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">O conector local não está iniciado. Execute <code>pnpm connector</code> em outra janela.</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
 }
