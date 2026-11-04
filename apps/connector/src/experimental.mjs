@@ -15,7 +15,7 @@ let socket = null;
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
 const parse = request => new Promise(resolve => { let raw = ''; request.on('data', chunk => raw += chunk); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } }); });
-const numberFromJid = jid => String(jid || '').split('@')[0].replace(/\D/g, '');
+const numberFromJid = jid => String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '').slice(0, 13);
 const publicState = () => ({ status: state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size });
 
 async function connect() {
