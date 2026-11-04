@@ -13,6 +13,7 @@ const api = async (path, options = {}) => {
   return data;
 };
 const esc = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+const formatPhone = value => { const digits = String(value || '').replace(/\D/g, '').slice(0, 13); if (digits.length <= 2) return digits ? '+' + digits : ''; if (digits.length <= 4) return '+' + digits.slice(0, 2) + ' (' + digits.slice(2); if (digits.length <= 9) return '+' + digits.slice(0, 2) + ' (' + digits.slice(2, 4) + ') ' + digits.slice(4); return '+' + digits.slice(0, 2) + ' (' + digits.slice(2, 4) + ') ' + digits.slice(4, 9) + '-' + digits.slice(9); };
 const supervisor = () => ['supervisor', 'company_admin', 'superadmin'].includes(state.profile?.role);
 
 function login() {
@@ -186,7 +187,10 @@ async function whatsapp() {
     document.querySelector('#disconnect').onclick = async () => { await fetch('http://localhost:3200/api/whatsapp/disconnect', { method: 'POST' }); whatsapp(); };
     document.querySelector('#deleteSession').onclick = async () => { if (confirm('Apagar a sessão local do WhatsApp?')) { await fetch('http://localhost:3200/api/whatsapp/logout-and-delete-session', { method: 'POST' }); whatsapp(); } };
     document.querySelector('#stop').onclick = async () => { await fetch('http://localhost:3200/api/whatsapp/emergency-stop', { method: 'POST' }); whatsapp(); };
+    const numberInput = document.querySelector('#allow [name=number]');
+    numberInput.oninput = () => { numberInput.value = formatPhone(numberInput.value); };
     document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await fetch('http://localhost:3200/api/whatsapp/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); };
+    if (status.status === 'waiting_qr' || status.status === 'connecting' || status.status === 'reconnecting') setTimeout(whatsapp, 1200);
   };
   try { draw(await getStatus()); } catch { app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">O conector local não está iniciado. Execute <code>pnpm connector</code> em outra janela.</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
 }
