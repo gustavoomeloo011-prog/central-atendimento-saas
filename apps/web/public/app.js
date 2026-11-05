@@ -5,6 +5,7 @@ let state = {};
 let activeId = null;
 let menuClosed = localStorage.getItem('central_menu_closed') === '1';
 let inboxMode = 'general';
+let whatsappMode = 'qr';
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -221,22 +222,33 @@ async function submit(event, path, after) {
 }
 
 async function whatsapp() {
-  const getStatus = async () => fetch('http://localhost:3200/api/whatsapp/status').then(response => response.json());
+  const getStatus = () => api('/api/whatsapp/status');
   const draw = status => {
+    const connected = status.status === 'CONNECTED';
+    const pair = status.pairing || {};
+    const code = pair.code && !pair.expired ? pair.code : null;
+    const label = connected ? 'WhatsApp conectado com sucesso!' : code ? 'Código gerado, aguardando vinculação' : pair.expired ? 'Código expirado' : status.status === 'PAIRING_REQUESTED' ? 'Aguardando geração do código' : status.status === 'PAIRING_ERROR' || status.status === 'ERROR' ? 'Falha na conexão' : status.status === 'CONNECTING' || status.status === 'RECONNECTING' ? 'Conectando' : 'WhatsApp desconectado';
     const qr = status.qr ? '<img class="qr" src="' + status.qr + '" alt="QR Code do WhatsApp">' : '<div class="qrPlaceholder">Nenhum QR Code ativo</div>';
-    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>WhatsApp Experimental</h2><p class="muted">Conector local Baileys para testes controlados. Nenhuma mensagem é enviada automaticamente.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="card whatsappCard"><p><b>Status:</b> ' + esc(status.status) + '</p><p><b>Número conectado:</b> ' + esc(status.phone || 'aguardando') + '</p>' + qr + '<div class="toolbar"><button class="btn" id="connect">Conectar WhatsApp</button><button class="btn subtle" id="disconnect">Desconectar</button><button class="btn subtle" id="deleteSession">Encerrar e apagar sessão</button></div><hr><h3>Números autorizados</h3><p class="muted">Apenas números cadastrados podem acionar o modo experimental. Aceita o formato +55 (11) 96693-1967.</p><form id="allow"><input name="number" type="tel" placeholder="+55 (11) 96693-1967"><button class="btn">Autorizar número</button></form><p><b>Autorizados:</b> ' + esc(status.allowedCount) + '</p><button class="btn emergency" id="stop">Desativar todas as respostas automáticas</button></div></section>', 'WhatsApp Experimental');
+    const pairingView = '<form id="pairForm" class="pairForm"><label class="field">Número do WhatsApp com DDI e DDD<input name="number" type="tel" inputmode="tel" autocomplete="tel" placeholder="+55 (11) 9XXXX-XXXX" required></label><button class="btn" ' + (connected ? 'disabled' : '') + '>Gerar código de pareamento</button></form>' + (code ? '<div class="pairCode" aria-live="polite">' + esc(code.slice(0,4) + '-' + code.slice(4)) + '</div><button class="btn subtle" id="copyPair">Copiar código</button><p class="muted">O código expira em aproximadamente cinco minutos.</p>' : '') + '<ol class="pairInstructions"><li>Abra o WhatsApp no celular principal.</li><li>Entre em Configurações → Dispositivos conectados.</li><li>Selecione Conectar dispositivo.</li><li>Escolha Conectar com número de telefone.</li><li>Digite o código apresentado na central.</li><li>Aguarde a confirmação da conexão.</li></ol><p class="muted">Os nomes das opções podem variar conforme o aparelho e a versão do WhatsApp.</p>';
+    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>WhatsApp Experimental</h2><p class="muted">Conector local Baileys para testes controlados.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="card whatsappCard"><p aria-live="polite"><b>' + esc(label) + '</b></p><p><b>Número conectado:</b> ' + esc(status.phone || 'aguardando') + '</p>' + (status.lastError ? '<p class="muted">' + esc(status.lastError) + '</p>' : '') + '<div class="pairTabs"><button class="btn ' + (whatsappMode === 'qr' ? '' : 'subtle') + '" id="showQr">QR Code</button><button class="btn ' + (whatsappMode === 'pair' ? '' : 'subtle') + '" id="showPair">Código de pareamento</button></div>' + (whatsappMode === 'qr' ? qr + '<button class="btn" id="connect">Conectar por QR Code</button>' : pairingView) + '<div class="pairTabs"><button class="btn subtle" id="disconnect">Desconectar</button><button class="btn subtle" id="deleteSession">Encerrar e apagar sessão</button></div><hr><h3>Números autorizados</h3><form id="allow"><input name="number" type="tel" placeholder="+55 (11) 9XXXX-XXXX"><button class="btn">Autorizar número</button></form><p><b>Autorizados:</b> ' + esc(status.allowedCount) + '</p><button class="btn emergency" id="stop">Desativar todas as respostas automáticas</button></div></section>', 'WhatsApp Experimental');
     bindShell();
     document.querySelector('#back').onclick = settings;
-    document.querySelector('#connect').onclick = async () => { await fetch('http://localhost:3200/api/whatsapp/connect', { method: 'POST' }); whatsapp(); };
-    document.querySelector('#disconnect').onclick = async () => { await fetch('http://localhost:3200/api/whatsapp/disconnect', { method: 'POST' }); whatsapp(); };
-    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Apagar a sessão local do WhatsApp?')) { await fetch('http://localhost:3200/api/whatsapp/logout-and-delete-session', { method: 'POST' }); whatsapp(); } };
-    document.querySelector('#stop').onclick = async () => { await fetch('http://localhost:3200/api/whatsapp/emergency-stop', { method: 'POST' }); whatsapp(); };
+    document.querySelector('#showQr').onclick = () => { whatsappMode = 'qr'; whatsapp(); };
+    document.querySelector('#showPair').onclick = () => { whatsappMode = 'pair'; whatsapp(); };
+    if (whatsappMode === 'qr') document.querySelector('#connect').onclick = async () => { try { await api('/api/whatsapp/connect', { method: 'POST' }); whatsapp(); } catch (error) { alert(error.message); } };
+    if (whatsappMode === 'pair') {
+      document.querySelector('#pairForm').onsubmit = async event => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { await api('/api/whatsapp/pairing-code', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); } catch (error) { alert(error.message); button.disabled = false; whatsapp(); } };
+      if (code) document.querySelector('#copyPair').onclick = () => navigator.clipboard.writeText(code).then(() => alert('Código copiado.')).catch(() => alert('Não foi possível copiar. Selecione o código na tela.'));
+    }
+    document.querySelector('#disconnect').onclick = async () => { if (confirm('Desconectar este WhatsApp?')) { await api('/api/whatsapp/disconnect', { method: 'POST' }); whatsapp(); } };
+    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Encerrar e apagar a sessão local do WhatsApp?')) { await api('/api/whatsapp/logout-and-delete-session', { method: 'POST' }); whatsapp(); } };
+    document.querySelector('#stop').onclick = async () => { await api('/api/whatsapp/emergency-stop', { method: 'POST' }); whatsapp(); };
     const numberInput = document.querySelector('#allow [name=number]');
     numberInput.oninput = () => { numberInput.value = formatPhone(numberInput.value); };
-    document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await fetch('http://localhost:3200/api/whatsapp/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); };
-    if (status.status === 'QR_PENDING' || status.status === 'CONNECTING' || status.status === 'RECONNECTING') setTimeout(whatsapp, 1200);
+    document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await api('/api/whatsapp/authorize', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); };
+    if (['QR_PENDING','CONNECTING','RECONNECTING','PAIRING_REQUESTED','PAIRING_CODE'].includes(status.status)) setTimeout(() => { if (document.querySelector('#pairForm') || document.querySelector('#connect')) whatsapp(); }, 1500);
   };
-  try { draw(await getStatus()); } catch { app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">O conector local não está iniciado. Execute <code>pnpm connector</code> em outra janela.</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
+  try { draw(await getStatus()); } catch { app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">Conector local indisponível. A vinculação remota pelo Render requer a futura ponte autenticada.</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
 }
 
 token ? boot() : login();

@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env apps/web/src/server.pg.mjs",
     "connector": "node --env-file-if-exists=.env apps/connector/src/experimental.mjs",
-    "test": "node --test tests/foundation.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "dev:legacy": "node --env-file-if-exists=.env apps/web/src/server.mjs"
   },
   "engines": {
     "node": ">=22"

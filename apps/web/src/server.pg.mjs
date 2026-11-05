@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createPersistence } from './persistence.mjs';
+import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 
 const db = createPersistence();
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -70,6 +71,7 @@ async function handle(request, response) {
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/outbound') { if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'}); const input=await body(request); const company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''); if (company!==process.env.WHATSAPP_COMPANY_ID) return json(response,403,{error:'Empresa não autorizada.'}); const c=await conversation(company,String(input.conversation_id||'')); if (!c) return json(response,404,{error:'Conversa não encontrada.'}); const provider=String(input.message_id||'')||null; const existing=provider&&await db.one('select id from public.messages where provider_message_id=$1',[provider]); if (existing) return json(response,200,{ok:true,message_id:existing.id,delivery:'sent'}); const id=randomUUID(); await db.query('insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id) values($1,$2,$3,$4,$5,$6)',[id,company,c.id,String(input.body||''),'outbound',provider]); return json(response,201,{ok:true,message_id:id,delivery:'sent'}); }
   const session=await sessionFor(request); if (!session) return json(response,401,{error:'Sessão expirada.'});
   const company=session.profile.company_id, pieces=url.pathname.split('/').filter(Boolean);
+  if (url.pathname.startsWith('/api/whatsapp/')) return admin(session) ? proxyWhatsApp(request,response,company) : json(response,403,{error:'Somente supervisores podem gerenciar a conexão.'});
   if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
     const [companyRow,conversations,departments,replies]=await Promise.all([
       db.one('select * from public.companies where id=$1',[company]),

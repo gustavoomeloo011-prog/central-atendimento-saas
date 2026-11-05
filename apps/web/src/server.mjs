@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const databasePath = process.env.DATABASE_PATH || join(process.cwd(), 'data', 'central-atendimento.db');
@@ -57,7 +58,7 @@ if (!conversationColumns.includes('human_started_at')) db.exec("alter table conv
 db.exec('create unique index if not exists idx_conversations_protocol on conversations(protocol);' +
   'create table if not exists internal_notes(id text primary key,company_id text not null,conversation_id text not null,profile_id text,body text not null,created_at text not null);' +
   'create table if not exists conversation_ratings(id text primary key,company_id text not null,conversation_id text not null,protocol text,stars integer not null,comment text,created_at text not null);');
-const protocolFor = (companyId, id) => { const existing = db.prepare('select protocol from conversations where id=? and company_id=?').get(id, companyId)?.protocol; if (existing) return existing; const day = new Date().toISOString().slice(0,10).replaceAll('-', ''); const count = db.prepare('select count(*) total from conversations where company_id=?').get(companyId).total; const protocol = day + '-' + String(count).padStart(6, '0'); db.prepare('update conversations set protocol=? where id=? and company_id=?').run(protocol, id, companyId); return protocol; };
+const protocolFor = (companyId, id) => { const existing = db.prepare('select protocol from conversations where id=? and company_id=?').get(id, companyId)?.protocol; if (existing) return existing; const day = new Date().toISOString().slice(0,10).replaceAll('-', ''); const rows = db.prepare('select protocol from conversations where protocol like ?').all(day + '-%'); const next = rows.reduce((max, row) => Math.max(max, Number(row.protocol.slice(9)) || 0), 0) + 1; const protocol = day + '-' + String(next).padStart(6, '0'); db.prepare('update conversations set protocol=? where id=? and company_id=?').run(protocol, id, companyId); return protocol; };
 for (const row of db.prepare('select id,company_id from conversations where protocol is null').all()) protocolFor(row.company_id, row.id);
 
 const sessions = new Map();
@@ -133,6 +134,7 @@ const server = createServer(async (request, response) => {
   const session = getSession(request);
   if (!session) return respond(response, 401, { error: 'Sessão expirada.' });
   const companyId = session.profile.company_id;
+  if (url.pathname.startsWith('/api/whatsapp/')) return ['supervisor','company_admin','superadmin'].includes(session.profile.role) ? proxyWhatsApp(request,response,companyId) : respond(response,403,{error:'Somente supervisores podem gerenciar a conexão.'});
   const pieces = url.pathname.split('/').filter(Boolean);
   if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
     const conversations = db.prepare('select c.*,d.name department_name,p.name assignee_name,(select body from messages m where m.conversation_id=c.id order by created_at desc limit 1) last_message from conversations c join departments d on d.id=c.department_id left join profiles p on p.id=c.assigned_profile_id where c.company_id=? order by case c.status when \'waiting\' then 0 else 1 end,c.updated_at desc').all(companyId);
