@@ -22,7 +22,10 @@ const pairing = createPairingController();
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
 const parse = request => new Promise(resolve => { let raw = ''; request.on('data', chunk => raw += chunk); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } }); });
-const numberFromJid = jid => String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '').slice(0, 13);
+const numberFromJid = jid => {
+  const value=String(jid||''),digits=value.split('@')[0].split(':')[0].replace(/\D/g,'');
+  return value.endsWith('@s.whatsapp.net') ? digits.slice(0,15) : digits;
+};
 const publicState = () => { const p=pairing.snapshot(); return { status: p.expired && state.status === 'PAIRING_CODE' ? 'PAIRING_EXPIRED' : state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size, pairing: p }; };
 
 async function connect() {
@@ -145,7 +148,7 @@ const server = createServer(async (request, response) => {
     const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
     if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
     if (!phone || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Telefone e conteúdo são obrigatórios.' });
-    const jid = /@(s\.whatsapp\.net|lid)$/.test(String(input.jid||'')) ? String(input.jid) : phone + '@s.whatsapp.net';
+    const jid = /^55\d{10,11}$/.test(phone) ? phone + '@s.whatsapp.net' : /@(s\.whatsapp\.net|lid)$/.test(String(input.jid||'')) ? String(input.jid) : phone + '@s.whatsapp.net';
     const contextInfo = input.reply?.provider_message_id ? { stanzaId: input.reply.provider_message_id, participant: jid, quotedMessage: { conversation: String(input.reply.body || '') } } : undefined;
     let payload = { text, ...(contextInfo ? { contextInfo } : {}) };
     if (input.attachment?.data) {
