@@ -2,7 +2,8 @@ import pg from 'pg';
 
 export function createPersistence(connectionString = process.env.DATABASE_URL) {
   if (!connectionString) throw new Error('DATABASE_URL é obrigatória para iniciar a central.');
-  const pool = new pg.Pool({ connectionString, max: 10, ssl: connectionString.includes('localhost') ? false : { rejectUnauthorized: true } });
+  const rejectUnauthorized = process.env.PGSSL_REJECT_UNAUTHORIZED !== 'false';
+  const pool = new pg.Pool({ connectionString, max: 10, ssl: connectionString.includes('localhost') ? false : { rejectUnauthorized } });
   const query = async (sql, values = []) => (await pool.query(sql, values)).rows;
   const one = async (sql, values = []) => (await query(sql, values))[0] || null;
   const transaction = async work => {
