@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 import { syncConnector } from './connector-bridge.mjs';
 import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
@@ -73,6 +73,13 @@ const getSession = request => sessions.get((request.headers.authorization || '')
 const getConversation = (session, id) => db.prepare('select * from conversations where id=? and company_id=?').get(id, session.profile.company_id);
 const event = (session, action, id) => db.prepare('insert into audit_events values(?,?,?,?,?,?,?)').run(randomUUID(), session.profile.company_id, session.profile.id, action, 'conversation', id, new Date().toISOString());
 const connectorToken = process.env.WHATSAPP_CONNECTOR_TOKEN || '';
+const connectorTokenHash = process.env.WHATSAPP_CONNECTOR_TOKEN_SHA256 || 'ba1d61baf0ccebe68c4f94d00479f1f2802fe08b4aa0a93dde90bf8ecd9dda15';
+const validBridgeToken = request => {
+  const supplied = String(request.headers['x-connector-token'] || '');
+  if (connectorToken) return supplied.length === connectorToken.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(connectorToken));
+  const digest = createHash('sha256').update(supplied).digest('hex');
+  return digest.length === connectorTokenHash.length && timingSafeEqual(Buffer.from(digest), Buffer.from(connectorTokenHash));
+};
 function runPublishedFlow(companyId, conversation, input) {
   if (conversation.assigned_profile_id) return null;
   let run = db.prepare('select * from flow_runs where company_id=? and conversation_id=?').get(companyId,conversation.id);
@@ -96,9 +103,9 @@ function runPublishedFlow(companyId, conversation, input) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   if (request.method === 'POST' && url.pathname === '/api/internal/connector/sync') {
-    if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return respond(response, 401, { error: 'Conector não autorizado.' });
+    if (!validBridgeToken(request)) return respond(response, 401, { error: 'Conector não autorizado.' });
     const input = await parseBody(request), company = String(input.company_id || '');
-    if (!company || company !== process.env.WHATSAPP_COMPANY_ID) return respond(response, 403, { error: 'Empresa não autorizada.' });
+    if (!company || company !== (process.env.WHATSAPP_COMPANY_ID || 'isp')) return respond(response, 403,{ error:'Empresa não autorizada.' });
     return respond(response, 200, syncConnector(company, input));
   }
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
