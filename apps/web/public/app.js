@@ -1,3 +1,4 @@
+import { showFlowEditor } from './flow-editor.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
 let token = localStorage.getItem('central_token');
@@ -120,8 +121,9 @@ async function openPanel(type) {
     app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Equipe</h2><p class="muted">Atendentes individuais, status e permissões da empresa.</p></div><button class="btn" id="manageTeam">Gerenciar equipe</button></div><div class="settingsGrid">' + people + '</div></section>', 'Equipe');
     document.querySelector('#manageTeam').onclick = settings;
   } else if (type === 'automations') {
-    const quick = data.replies.map(reply => '<li><b>' + esc(reply.shortcut) + '</b> · ' + esc(reply.body) + '</li>').join('');
-    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Automações</h2><p class="muted">Mensagens configuráveis e encaminhamento controlado para filas.</p></div><button class="btn" id="manageAutomation">Editar automações</button></div><div class="settingsGrid"><article class="card"><h3>Mensagem inicial</h3><p>' + esc(data.settings?.welcome_message) + '</p></article><article class="card"><h3>Encaminhamento</h3><p>' + esc(data.settings?.fallback_message) + '</p></article><article class="card"><h3>Mensagens rápidas</h3><ul>' + quick + '</ul></article></div></section>', 'Automações');
+    const flows = (await api('/api/flows')).flows;
+    const cards = flows.length ? flows.map(flow => '<article class="card"><span class="tag">' + esc(flow.status) + '</span><h3>' + esc(flow.name) + '</h3><p class="muted">Versão publicada: ' + esc(flow.published_version || 'nenhuma') + '</p></article>').join('') : '<article class="card"><h3>Nenhum fluxo cadastrado</h3><p class="muted">Crie o primeiro fluxo no editor visual.</p></article>';
+    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Automações</h2><p class="muted">Crie caminhos de atendimento com blocos conectados e teste antes de publicar.</p></div><button class="btn" id="manageAutomation">Abrir editor visual</button></div><div class="settingsGrid">' + cards + '</div></section>', 'Automações');
     document.querySelector('#manageAutomation').onclick = automationEditor;
   } else {
     const total = state.conversations.length;
@@ -136,19 +138,7 @@ async function openPanel(type) {
 }
 
 async function automationEditor() {
-  const data = await api('/api/settings');
-  const flowData = await api('/api/flows');
-  const manager = supervisor();
-  if (!manager) return openPanel('automations');
-  const options = data.replies.map(reply => '<button class="flowOption" data-flow="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('');
-  const flowCards = flowData.flows.map(flow => '<article class="card flowCard"><b>' + esc(flow.name) + '</b> <span class="tag">' + esc(flow.status) + '</span><p class="muted">Versão publicada: ' + esc(flow.published_version || 'rascunho') + '</p></article>').join('');
-  app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Robô de atendimento</h2><p class="muted">Edite o fluxo e visualize como ele aparecerá para o cliente.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="automationEditor"><form class="card" id="autoForm"><h3>Mensagem inicial</h3><label class="field">Boas-vindas<textarea name="welcome_message">' + esc(data.settings?.welcome_message) + '</textarea></label><label class="field">Mensagem de encaminhamento<textarea name="fallback_message">' + esc(data.settings?.fallback_message) + '</textarea></label><label class="field">Tentativas antes de encaminhar<input name="max_attempts" type="number" min="1" max="5" value="' + esc(data.settings?.max_attempts || 2) + '"></label><button class="btn">Salvar fluxo</button></form><form class="card" id="quickForm"><h3>Adicionar opção clicável</h3><label class="field">Atalho<input name="shortcut" placeholder="/contratar"></label><label class="field">Mensagem da etapa<textarea name="body" placeholder="Esses são nossos planos. Como posso ajudar?"></textarea></label><label class="field">Fila<select name="department_id"><option value="">Todas</option>' + data.departments.map(item => '<option value="' + esc(item.id) + '">' + esc(item.name) + '</option>').join('') + '</select></label><button class="btn">Adicionar etapa</button></form><article class="card flowPreview"><div class="toolbar"><h3>Prévia no chat</h3><button class="btn subtle" id="expose" type="button">Expor no chat</button></div><div class="previewBubble">' + esc(data.settings?.welcome_message || '') + '</div><div class="flowOptions">' + options + '</div><p class="muted">Clique em uma opção para simular a próxima etapa.</p></article></div></section>', 'Automações');
-  bindShell();
-  document.querySelector('#back').onclick = () => openPanel('automations');
-  document.querySelector('#autoForm').onsubmit = event => submit(event, '/api/automation', automationEditor);
-  document.querySelector('#quickForm').onsubmit = event => submit(event, '/api/quick-replies', automationEditor);
-  document.querySelector('#expose').onclick = () => alert('Prévia exposta: as opções estão prontas para aparecer no chat.');
-  document.querySelectorAll('[data-flow]').forEach(button => button.onclick = () => alert('Próxima etapa: ' + button.dataset.flow));
+  return showFlowEditor({app,api,shell,bindShell,esc,back:()=>openPanel('automations')});
 }
 
 function bindConversation(conversation) {

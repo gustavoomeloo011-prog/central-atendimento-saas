@@ -5,7 +5,7 @@
 - Backup local criado antes de qualquer alteração: `backups/central-atendimento-20261104-213131.db`.
 - O SQLite original permanece intacto como referência; os registros antigos não serão importados.
 - O backend novo está em `apps/web/src/server.pg.mjs`, com consultas parametrizadas em `persistence.mjs`.
-- As migrations `001_foundation.sql`, `002_hybrid_supabase.sql` e `003_clean_saas.sql` compõem o schema limpo. Devem ser aplicadas em ordem em `Central-atendimento`.
+- As migrations `001_foundation.sql`, `002_hybrid_supabase.sql`, `003_clean_saas.sql` e `004_flow_runs.sql` compõem o schema limpo. Devem ser aplicadas em ordem em `Central-atendimento`.
 - Nenhuma migration foi executada remotamente: não há credenciais Supabase configuradas neste workspace.
 
 ## Variáveis necessárias (somente no Render ou no ambiente local seguro)
@@ -22,7 +22,7 @@ O conector local continuará guardando as credenciais Baileys apenas em `apps/co
 
 1. Configurar as quatro variáveis Supabase/PostgreSQL fora do repositório.
 2. Verificar que a conexão aponta para o projeto `Central-atendimento`.
-3. Aplicar as três migrations em ordem e, opcionalmente, `packages/database/seeds/demo.sql`.
+3. Aplicar as quatro migrations em ordem e, opcionalmente, `packages/database/seeds/demo.sql`.
 4. Configurar `DEMO_ADMIN_EMAIL` e `DEMO_ADMIN_PASSWORD` fora do Git e executar `node scripts/provision-admin.mjs` para criar o primeiro login no Supabase Auth.
 5. Rodar testes de isolamento e de fluxo completo antes do deploy no Render.
 6. Configurar as mesmas variáveis privadas no Render e conferir `/health`.

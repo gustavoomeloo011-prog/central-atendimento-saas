@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
+import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const databasePath = process.env.DATABASE_PATH || join(process.cwd(), 'data', 'central-atendimento.db');
@@ -25,6 +26,8 @@ db.exec('create table if not exists automation_settings(company_id text primary 
   'create table if not exists quick_replies(id text primary key,company_id text not null,shortcut text not null,body text not null,department_id text);' +
   'create table if not exists automation_flows(id text primary key,company_id text not null,name text not null,status text not null default \'draft\',published_version integer,created_at text not null,updated_at text not null);' +
   'create table if not exists automation_flow_versions(id text primary key,flow_id text not null,version integer not null,status text not null,definition text not null,created_at text not null,published_at text);');
+db.exec('create table if not exists flow_runs(conversation_id text primary key,company_id text not null,flow_id text not null,version_id text not null,node_id text,steps integer not null default 0,variables text not null default \'{}\',status text not null);' +
+  'create table if not exists flow_events(company_id text not null,provider_message_id text not null,conversation_id text not null,primary key(company_id,provider_message_id));');
 if (!db.prepare('select count(*) total from companies').get().total) {
   const now = new Date().toISOString();
   const quote = value => "'" + String(value).replaceAll("'", "''") + "'";
@@ -69,6 +72,25 @@ const getSession = request => sessions.get((request.headers.authorization || '')
 const getConversation = (session, id) => db.prepare('select * from conversations where id=? and company_id=?').get(id, session.profile.company_id);
 const event = (session, action, id) => db.prepare('insert into audit_events values(?,?,?,?,?,?,?)').run(randomUUID(), session.profile.company_id, session.profile.id, action, 'conversation', id, new Date().toISOString());
 const connectorToken = process.env.WHATSAPP_CONNECTOR_TOKEN || '';
+function runPublishedFlow(companyId, conversation, input) {
+  if (conversation.assigned_profile_id) return null;
+  let run = db.prepare('select * from flow_runs where company_id=? and conversation_id=?').get(companyId,conversation.id);
+  if (run && run.status !== 'active') return null;
+  if (!run) {
+    const version=db.prepare("select f.id flow_id,v.id version_id from automation_flows f join automation_flow_versions v on v.flow_id=f.id and v.version=f.published_version where f.company_id=? and f.status='published' order by f.updated_at desc limit 1").get(companyId);
+    if (!version) return null;
+    db.prepare('insert into flow_runs(conversation_id,company_id,flow_id,version_id,status) values(?,?,?,?,?)').run(conversation.id,companyId,version.flow_id,version.version_id,'active');
+    run=db.prepare('select * from flow_runs where conversation_id=?').get(conversation.id);
+  }
+  const version=db.prepare('select definition from automation_flow_versions where id=? and flow_id=?').get(run.version_id,run.flow_id);
+  if (!version) return null;
+  const graph=JSON.parse(version.definition);
+  const result=advanceFlow(graph,{nodeId:run.node_id,steps:run.steps,variables:JSON.parse(run.variables)},run.node_id?input:null);
+  db.prepare('update flow_runs set node_id=?,steps=?,variables=?,status=? where conversation_id=?').run(result.nodeId,result.steps,JSON.stringify(result.variables),result.finished?'finished':'active',conversation.id);
+  if (result.transfer) db.prepare("update conversations set department_id=?,assigned_profile_id=?,status='waiting',updated_at=? where id=? and company_id=?").run(result.transfer.departmentId,result.transfer.profileId,new Date().toISOString(),conversation.id,companyId);
+  const reply=result.output.filter(item=>item.type==='message').map(item=>item.text+(item.options?.length?'\n'+item.options.map((option,index)=>`${index+1}. ${option.label}`).join('\n'):'' )).join('\n\n');
+  return {reply:reply||null,queued:Boolean(result.transfer),result};
+}
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
@@ -98,19 +120,25 @@ const server = createServer(async (request, response) => {
     const phone = String(input.phone || '').replace(/\D/g, '');
     const body = String(input.body || '').trim();
     if (!phone || !body) return respond(response, 400, { error: 'Telefone e mensagem são obrigatórios.' });
+    const providerId=String(input.provider_message_id||input.message_id||'').trim();
+    if(providerId){const prior=db.prepare('select conversation_id from flow_events where company_id=? and provider_message_id=?').get(companyId,providerId);if(prior)return respond(response,200,{ok:true,conversation_id:prior.conversation_id,duplicate:true,reply:null});}
     const now = new Date().toISOString();
-    let conversation = db.prepare('select * from conversations where company_id=? and contact_phone=? order by updated_at desc limit 1').get(companyId, phone);
+    let conversation = db.prepare("select * from conversations where company_id=? and contact_phone=? and status!='closed' order by updated_at desc limit 1").get(companyId, phone);
     if (!conversation) {
       const department = db.prepare('select id from departments where company_id=? order by id limit 1').get(companyId);
       if (!department) return respond(response, 409, { error: 'A empresa não possui fila configurada.' });
-      const id = 'wa-' + phone;
+      const id = 'wa-' + randomUUID();
       db.prepare('insert into conversations(id,company_id,department_id,assigned_profile_id,contact_name,contact_phone,subject,status,priority,created_at,updated_at,queue_type,bot_attempts) values(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, companyId, department.id, null, input.name || phone, phone, 'WhatsApp', 'waiting', 'normal', now, now, department.id, 0);
       conversation = db.prepare('select * from conversations where id=?').get(id);
     }
+    if(providerId)db.prepare('insert into flow_events values(?,?,?)').run(companyId,providerId,conversation.id);
     const protocol = protocolFor(companyId, conversation.id);
     const settings = db.prepare('select * from automation_settings where company_id=?').get(companyId);
     const inboundCount = db.prepare("select count(*) total from messages where conversation_id=? and direction='inbound'").get(conversation.id).total + 1;
     db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, conversation.id, null, body, 'inbound', now);
+    const graphReply=runPublishedFlow(companyId,conversation,body);
+    if(graphReply)return respond(response,201,{ok:true,conversation_id:conversation.id,protocol,reply:graphReply.reply,queued:graphReply.queued});
+    if(conversation.assigned_profile_id || db.prepare('select status from flow_runs where conversation_id=?').get(conversation.id)) return respond(response,201,{ok:true,conversation_id:conversation.id,protocol,reply:null,queued:false});
     const financial = /financeiro|fatura|segunda via|boleto/i.test(body);
     const reachedLimit = settings && inboundCount >= settings.max_attempts;
     let reply = null;
@@ -204,7 +232,7 @@ const server = createServer(async (request, response) => {
     const input = await parseBody(request); const name = String(input.name || '').trim();
     if (!name) return respond(response, 400, { error: 'Informe o nome do fluxo.' });
     const now = new Date().toISOString(); const flowId = randomUUID(); const versionId = randomUUID();
-    const definition = JSON.stringify(input.definition || { nodes: [{ id: 'start', type: 'menu', title: 'Início', message: '', options: [] }], edges: [] });
+    const definition = JSON.stringify(input.definition || newFlow());
     db.prepare('insert into automation_flows values(?,?,?,?,?,?,?)').run(flowId, companyId, name, 'draft', null, now, now);
     db.prepare('insert into automation_flow_versions values(?,?,?,?,?,?,?)').run(versionId, flowId, 1, 'draft', definition, now, null);
     return respond(response, 201, { id: flowId, version: 1 });
@@ -215,12 +243,20 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET') return respond(response, 200, { flow, versions: db.prepare('select * from automation_flow_versions where flow_id=? order by version desc').all(flow.id) });
     if (!canManage) return respond(response, 403, { error: 'Sem permissão para editar fluxos.' });
     if (request.method === 'POST' && pieces[3] === 'publish') {
+      const input = await parseBody(request);
+      const errors = validateFlow(input.definition, { departments: db.prepare('select * from departments where company_id=?').all(companyId) });
+      if (errors.length) return respond(response, 400, { error: errors.join(' ') });
       db.prepare("update automation_flow_versions set status='archived' where flow_id=? and status='published'").run(flow.id);
       const version = db.prepare('select coalesce(max(version),0)+1 version from automation_flow_versions where flow_id=?').get(flow.id).version;
-      const input = await parseBody(request); const now = new Date().toISOString();
+      const now = new Date().toISOString();
       db.prepare('insert into automation_flow_versions values(?,?,?,?,?,?,?)').run(randomUUID(), flow.id, version, 'published', JSON.stringify(input.definition || {}), now, now);
+      db.prepare("update automation_flows set status='archived',updated_at=? where company_id=? and id<>? and status='published'").run(now,companyId,flow.id);
       db.prepare('update automation_flows set status=?,published_version=?,updated_at=? where id=?').run('published', version, now, flow.id);
       return respond(response, 200, { ok: true, version });
+    }
+    if (request.method === 'POST' && pieces[3] === 'disable') {
+      db.prepare('update automation_flows set status=?,updated_at=? where id=? and company_id=?').run('archived',new Date().toISOString(),flow.id,companyId);
+      return respond(response,200,{ok:true});
     }
     if (request.method === 'PUT') {
       const input = await parseBody(request); const now = new Date().toISOString();
@@ -247,6 +283,7 @@ const server = createServer(async (request, response) => {
     if (!message) return respond(response, 400, { error: 'Escreva uma mensagem.' });
     db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, id, session.profile.id, message, 'outbound', now);
     db.prepare('update conversations set status=?,assigned_profile_id=?,updated_at=? where id=?').run('open', session.profile.id, now, id);
+    db.prepare("update flow_runs set status='paused' where conversation_id=? and company_id=?").run(id,companyId);
     event(session, 'message_sent', id);
     return respond(response, 201, { ok: true });
   }
@@ -256,6 +293,9 @@ const server = createServer(async (request, response) => {
     const settings = db.prepare('select * from automation_settings where company_id=?').get(companyId);
     const inboundCount = db.prepare("select count(*) total from messages where conversation_id=? and direction='inbound'").get(id).total + 1;
     db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, id, null, message, 'inbound', now);
+    const graphReply=runPublishedFlow(companyId,selected,message);
+    if(graphReply){if(graphReply.reply)db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(),companyId,id,null,graphReply.reply,'outbound',now);return respond(response,201,{ok:true});}
+    if(selected.assigned_profile_id || db.prepare('select status from flow_runs where conversation_id=?').get(id)) return respond(response,201,{ok:true});
     const financial = /financeiro|fatura|segunda via|boleto/i.test(message);
     const reachedLimit = inboundCount >= settings.max_attempts;
     if (financial || reachedLimit) {
@@ -272,11 +312,13 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && action === 'assume') {
     db.prepare('update conversations set assigned_profile_id=?,status=?,updated_at=? where id=?').run(session.profile.id, 'open', now, id);
+    db.prepare("update flow_runs set status='paused' where conversation_id=? and company_id=?").run(id,companyId);
     event(session, 'conversation_assumed', id);
     return respond(response, 200, { ok: true });
   }
   if (request.method === 'POST' && action === 'close') {
     db.prepare('update conversations set status=?,updated_at=? where id=?').run('closed', now, id);
+    db.prepare("update flow_runs set status='finished' where conversation_id=? and company_id=?").run(id,companyId);
     event(session, 'conversation_closed', id);
     return respond(response, 200, { ok: true });
   }
