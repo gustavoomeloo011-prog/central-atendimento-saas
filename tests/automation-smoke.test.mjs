@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { exampleFlow } from '../apps/web/public/flow.js';
 
 test('supervisor cria e publica fluxo; consulta após atualização', async () => {
   const directory=await mkdtemp(join(tmpdir(),'central-flows-test-'));
@@ -32,5 +33,13 @@ test('supervisor cria e publica fluxo; consulta após atualização', async () =
     assert.equal((await call(`/api/conversations/${another.conversation_id}/assume`,'POST',{})).status,200);
     const afterHuman=await fetch(base+'/api/internal/whatsapp/inbound',{method:'POST',headers:{'content-type':'application/json','x-connector-token':'test-connector'},body:JSON.stringify({company_id:'isp',phone:'5511999990001',message_id:'smoke-4',body:'Sim'})}).then(r=>r.json());
     assert.equal(afterHuman.reply,null);
+    const completeExample=exampleFlow();completeExample.nodes.filter(node=>node.type==='end').forEach(node=>node.title=node.title.replace('Configurar:','Encerrar:'));
+    const example=await call('/api/flows','POST',{name:'Árvore de atendimento',definition:completeExample}).then(r=>r.json());
+    assert.equal((await call(`/api/flows/${example.id}/publish`,'POST',{definition:completeExample})).status,200);
+    const step=(message_id,body)=>fetch(base+'/api/internal/whatsapp/inbound',{method:'POST',headers:{'content-type':'application/json','x-connector-token':'test-connector'},body:JSON.stringify({company_id:'isp',phone:'5511999990002',message_id,body})}).then(r=>r.json());
+    assert.match((await step('tree-1','Oi')).reply,/Você já é nosso cliente/);
+    assert.match((await step('tree-2','Sou cliente')).reply,/Como posso ajudar/);
+    assert.match((await step('tree-3','Suporte')).reply,/Qual é o problema/);
+    assert.equal((await step('tree-4','Sem sinal')).reply,null);
   } finally { if(child.exitCode===null){child.kill();await new Promise(resolve=>child.once('exit',resolve));} await rm(directory,{recursive:true,force:true}); }
 });

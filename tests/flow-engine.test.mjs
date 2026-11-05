@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { advanceFlow, validateFlow } from '../apps/web/public/flow.js';
+import { advanceFlow, validateFlow, exampleFlow } from '../apps/web/public/flow.js';
 
 const graph={
   nodes:[
@@ -50,4 +50,17 @@ test('ciclo excessivo para sem travar o processo',()=>{
   const result=advanceFlow(loop,null);
   assert.equal(result.finished,true);
   assert.match(result.output.at(-1).text,/loop/);
+});
+
+test('modelo visual da imagem percorre cliente, suporte e sem sinal',()=>{
+  const flow=exampleFlow();
+  assert.match(validateFlow(flow).join(' '),/Complete a etapa/);
+  let state=advanceFlow(flow,null);
+  assert.equal(state.output[0].text,'Olá! Você já é nosso cliente?');
+  state=advanceFlow(flow,state,'Sou cliente');
+  assert.equal(state.output[0].text,'Como posso ajudar?');
+  state=advanceFlow(flow,state,'Suporte');
+  assert.equal(state.output[0].text,'Qual é o problema?');
+  state=advanceFlow(flow,state,'Sem sinal');
+  assert.equal(state.finished,true);
 });

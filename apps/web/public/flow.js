@@ -2,6 +2,22 @@ export const FLOW_TYPES = ['start','message','question','wait','condition','acti
 export const FLOW_LABELS = {start:'Início',message:'Enviar mensagem',question:'Pergunta com opções',wait:'Aguardar resposta',condition:'Condição',action:'Ação',transfer:'Transferir atendimento',integration:'Integração externa',end:'Encerrar fluxo'};
 export const newFlow = () => ({nodes:[{id:'start',type:'start',title:'Início',x:100,y:180,message:'',options:[]}],edges:[]});
 export const newNode = (type,x=360,y=180) => ({id:crypto.randomUUID(),type,title:FLOW_LABELS[type]||'Etapa',x,y,message:'',options:type==='question'?[{id:crypto.randomUUID(),label:'Sim'},{id:crypto.randomUUID(),label:'Não'}]:[],invalidReply:'Escolha uma das opções apresentadas.',timeoutMinutes:0,condition:'',variable:'',value:'',departmentId:'',profileId:''});
+export function exampleFlow(){
+  const flow=newFlow();
+  const add=(title,message,labels)=>{const node=newNode('question');node.title=title;node.message=message;node.options=labels.map(label=>({id:crypto.randomUUID(),label}));flow.nodes.push(node);return node;};
+  const end=title=>{const node=newNode('end');node.title=title;flow.nodes.push(node);return node;};
+  const link=(a,port,b)=>flow.edges.push({id:crypto.randomUUID(),source:a.id,port,target:b.id});
+  const initial=add('Mensagem inicial','Olá! Você já é nosso cliente?',['Sou cliente','Não sou cliente']);
+  const client=add('Fluxo do cliente','Como posso ajudar?',['Suporte','Financeiro','Promoções']);
+  const newClient=add('Fluxo para novos clientes','O que você deseja?',['Conhecer planos','Consultar cobertura','Falar com vendas']);
+  const support=add('Fluxo de suporte','Qual é o problema?',['Sem sinal','Lentidão','Outro problema']);
+  const billing=add('Fluxo financeiro','Escolha uma opção',['2ª via','Pagamento','Negociação']);
+  const promo=add('Fluxo de promoções','Quer participar da promoção?',['Sim','Não']);
+  link(flow.nodes[0],'next',initial);link(initial,initial.options[0].id,client);link(initial,initial.options[1].id,newClient);
+  link(client,client.options[0].id,support);link(client,client.options[1].id,billing);link(client,client.options[2].id,promo);
+  for(const question of [newClient,support,billing,promo])for(const option of question.options)link(question,option.id,end(`Configurar: ${option.label}`));
+  return flow;
+}
 export const outgoing = (flow,id,port='next') => flow.edges.find(edge=>edge.source===id && edge.port===port)?.target;
 export function validateFlow(flow,{departments=[]}={}) {
   const errors=[]; if (!flow||!Array.isArray(flow.nodes)||!Array.isArray(flow.edges)||flow.nodes.some(n=>!n||typeof n.id!=='string'||typeof n.type!=='string'||!Array.isArray(n.options||[]))||flow.edges.some(e=>!e||typeof e.source!=='string'||typeof e.target!=='string'||typeof e.port!=='string')) return ['Estrutura do fluxo inválida.'];
@@ -19,6 +35,7 @@ export function validateFlow(flow,{departments=[]}={}) {
     if(n.type==='action'&&!/^[a-zA-Z][a-zA-Z0-9_]{0,49}$/.test(String(n.variable||''))||n.type==='action'&&['constructor','prototype','__proto__'].includes(n.variable)) errors.push(`Defina uma variável segura para ${n.title||n.id}.`);
     if(n.type==='condition'&&!String(n.condition||'').trim()) errors.push(`Preencha a condição de ${n.title||n.id}.`);
     if(n.type==='integration') errors.push(`Integração externa ${n.title||n.id} ainda não possui executor seguro.`);
+    if(n.type==='end'&&String(n.title||'').startsWith('Configurar:')) errors.push(`Complete a etapa ${n.title} antes de publicar.`);
     const ports=n.type==='question'?(n.options||[]).map(o=>o.id):n.type==='condition'?['yes','no']:n.type==='end'||n.type==='transfer'?[]:['next'];
     if(n.type==='question'&&(!n.options?.length||n.options.some(o=>!String(o.label||'').trim())||new Set(n.options.map(o=>String(o.label||'').trim().toLowerCase())).size!==n.options.length)) errors.push(`As opções de ${n.title||n.id} precisam ser únicas e preenchidas.`);
     for(const port of ports) if(!outgoing(flow,n.id,port)) errors.push(`Caminho sem destino em ${n.title||n.id} (${port}).`);
