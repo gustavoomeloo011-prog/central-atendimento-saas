@@ -47,14 +47,15 @@ async function connect() {
       if (code !== DisconnectReason.loggedOut) setTimeout(() => { if (!socket && state.status === 'RECONNECTING') connect().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
     }
   });
-  socket.ev.on('messages.upsert', ({ messages }) => {
+  socket.ev.on('messages.upsert', ({ messages, type }) => {
+    if (type !== 'notify') return;
     for (const message of messages || []) {
       const jid = message.key?.remoteJid;
       const sender = numberFromJid(jid);
       if (!sender || message.key?.fromMe || jid?.endsWith('@g.us') || jid === 'status@broadcast') continue;
       const body = message.message?.conversation || message.message?.extendedTextMessage?.text || message.message?.imageMessage?.caption || '';
       if (!body || !connectorToken) continue;
-      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body }) }).then(response => response.json()).then(async result => {
+      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body, message_id: message.key?.id }) }).then(response => response.json()).then(async result => {
         console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
         if (state.autoReplyEnabled && result.reply) {
           const sent = await socket.sendMessage(jid, { text: result.reply });

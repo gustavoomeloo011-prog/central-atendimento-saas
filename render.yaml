@@ -5,12 +5,20 @@ services:
     plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile
     startCommand: pnpm dev
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: "22"
-      - key: DATABASE_PATH
-        value: /tmp/central-atendimento.db
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: WHATSAPP_COMPANY_ID
+        sync: false
       - key: WHATSAPP_CONNECTOR_URL
         sync: false
       - key: WHATSAPP_CONNECTOR_TOKEN

@@ -5,15 +5,14 @@
   "packageManager": "pnpm@10.13.1",
   "type": "module",
   "scripts": {
-    "dev": "node apps/web/src/server.mjs",
-    "connector": "node apps/connector/src/experimental.mjs",
+    "dev": "node --env-file-if-exists=.env apps/web/src/server.pg.mjs",
+    "connector": "node --env-file-if-exists=.env apps/connector/src/experimental.mjs",
     "test": "node --test tests/foundation.test.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.24",
-    "qrcode": "1.5.4"
+    "pg": "^8.16.3"
   }
 }
