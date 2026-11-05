@@ -5,7 +5,7 @@
   "packageManager": "pnpm@10.13.1",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=.env apps/web/src/server.pg.mjs",
+    "dev": "node --env-file-if-exists=.env apps/web/src/server.mjs",
     "dev:pg": "node --env-file-if-exists=.env apps/web/src/server.pg.mjs",
     "connector": "node --env-file-if-exists=.env apps/connector/src/experimental.mjs",
     "test": "node --test tests/*.test.mjs",

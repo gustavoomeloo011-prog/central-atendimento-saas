@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
+import { syncConnector } from './connector-bridge.mjs';
 import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -94,6 +95,12 @@ function runPublishedFlow(companyId, conversation, input) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
+  if (request.method === 'POST' && url.pathname === '/api/internal/connector/sync') {
+    if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return respond(response, 401, { error: 'Conector não autorizado.' });
+    const input = await parseBody(request), company = String(input.company_id || '');
+    if (!company || company !== process.env.WHATSAPP_COMPANY_ID) return respond(response, 403, { error: 'Empresa não autorizada.' });
+    return respond(response, 200, syncConnector(company, input));
+  }
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     return response.end(await readFile(join(publicDir, 'index.html')));
