@@ -14,7 +14,8 @@ test('supervisor cria e publica fluxo; consulta após atualização', async () =
   try {
     let ready=false; for(let i=0;i<50;i++){try{if((await fetch(base)).ok){ready=true;break;}}catch{} await new Promise(resolve=>setTimeout(resolve,100));}
     assert.equal(ready,true,stderr);
-    const login=await fetch(base+'/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'ana@conecta.demo',password:'demo'})}).then(r=>r.json());
+    const login=await fetch(base+'/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'Gustavo',password:'demo'})}).then(r=>r.json());
+    assert.equal(login.profile.role,'supervisor');
     const call=(path,method='GET',payload)=>fetch(base+path,{method,headers:{authorization:'Bearer '+login.token,'content-type':'application/json'},body:payload?JSON.stringify(payload):undefined});
     const created=await call('/api/flows','POST',{name:'Fluxo de teste',definition:{nodes:[{id:'start',type:'menu',message:'Olá',options:[]}],edges:[]}}); assert.equal(created.status,201);
     const flow=await created.json();

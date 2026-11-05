@@ -55,6 +55,7 @@ const conversationColumns = db.prepare('pragma table_info(conversations)').all()
 if (!conversationColumns.includes('protocol')) db.exec("alter table conversations add column protocol text");
 if (!conversationColumns.includes('closed_at')) db.exec("alter table conversations add column closed_at text");
 if (!conversationColumns.includes('human_started_at')) db.exec("alter table conversations add column human_started_at text");
+db.prepare('insert or ignore into profiles(id,company_id,name,email,role,password,status) values(?,?,?,?,?,?,?)').run('gustavo-demo','isp','Gustavo','gustavo@conecta.demo','supervisor','demo','available');
 db.exec('create unique index if not exists idx_conversations_protocol on conversations(protocol);' +
   'create table if not exists internal_notes(id text primary key,company_id text not null,conversation_id text not null,profile_id text,body text not null,created_at text not null);' +
   'create table if not exists conversation_ratings(id text primary key,company_id text not null,conversation_id text not null,protocol text,stars integer not null,comment text,created_at text not null);');
@@ -83,7 +84,8 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/login') {
     const input = await parseBody(request);
-    const profile = db.prepare('select * from profiles where email=? and password=?').get(String(input.email || '').trim().toLowerCase(), input.password);
+    const login = String(input.email || '').trim().toLowerCase();
+    const profile = db.prepare('select * from profiles where (lower(email)=? or lower(name)=?) and password=?').get(login, login, input.password);
     if (!profile) return respond(response, 401, { error: 'Credenciais de demonstração inválidas.' });
     const token = randomUUID();
     sessions.set(token, { profile });
