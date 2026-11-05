@@ -5,10 +5,12 @@ services:
     plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile
     startCommand: pnpm dev
-    healthCheckPath: /health
+    healthCheckPath: /
     envVars:
       - key: NODE_VERSION
         value: "22"
+      - key: DATABASE_PATH
+        value: /tmp/central-atendimento-demo.db
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL
