@@ -65,11 +65,12 @@ async function connect() {
     if (type !== 'notify') return;
     for (const message of messages || []) {
       const jid = message.key?.remoteJid;
-      const sender = numberFromJid(jid);
+      const phoneJid = message.key?.remoteJidAlt || message.key?.participantAlt || jid;
+      const sender = numberFromJid(phoneJid);
       if (!sender || message.key?.fromMe || jid?.endsWith('@g.us') || jid === 'status@broadcast') continue;
       const body = message.message?.conversation || message.message?.extendedTextMessage?.text || message.message?.imageMessage?.caption || '';
       if (!body || !connectorToken) continue;
-      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, name: message.pushName || sender, body, message_id: message.key?.id }) }).then(response => response.json()).then(async result => {
+      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, jid, name: message.pushName || sender, body, message_id: message.key?.id }) }).then(response => response.json()).then(async result => {
         console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
         if (state.autoReplyEnabled && result.reply) {
           const sent = await socket.sendMessage(jid, { text: result.reply });
@@ -136,7 +137,7 @@ const server = createServer(async (request, response) => {
     const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
     if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
     if (!phone || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Telefone e conteúdo são obrigatórios.' });
-    const jid = phone + '@s.whatsapp.net';
+    const jid = /@(s\.whatsapp\.net|lid)$/.test(String(input.jid||'')) ? String(input.jid) : phone + '@s.whatsapp.net';
     const contextInfo = input.reply?.provider_message_id ? { stanzaId: input.reply.provider_message_id, participant: jid, quotedMessage: { conversation: String(input.reply.body || '') } } : undefined;
     let payload = { text, ...(contextInfo ? { contextInfo } : {}) };
     if (input.attachment?.data) {
