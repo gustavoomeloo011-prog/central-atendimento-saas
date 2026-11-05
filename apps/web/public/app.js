@@ -8,6 +8,8 @@ let menuClosed = localStorage.getItem('central_menu_closed') === null ? matchMed
 let inboxMode = 'general';
 let mobilePane = 'list';
 let whatsappMode = 'qr';
+let replyTo = null;
+let liveTimer = null;
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -44,11 +46,31 @@ async function boot() {
     state.detail = null;
     render();
     if (activeId) await openConversation(activeId);
+    if (!liveTimer) liveTimer = setInterval(refreshLive, 2500);
   } catch {
     localStorage.removeItem('central_token');
     token = null;
     login();
   }
+}
+
+async function refreshLive() {
+  if (!token || document.hidden || document.activeElement?.matches('textarea,input,select')) return;
+  try {
+    const next = await api('/api/bootstrap');
+    const detail = activeId ? await api('/api/conversations/' + activeId) : null;
+    const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
+    const after = JSON.stringify([(next.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
+    if (before !== after) { state = {...next,detail}; render(); }
+  } catch {}
+}
+
+function messageHtml(message) {
+  const internal = message.direction === 'internal';
+  const attachment = message.attachment_path ? '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>' : '';
+  const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
+  const status = message.direction === 'outbound' ? (message.delivery_status === 'sent' ? ' ✓✓' : ' ✓') : '';
+  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '"><b class="messageAuthor">' + esc(internal ? '🔒 ' + message.author_name : message.author_name) + '</b>' + reply + '<div>' + esc(message.body) + '</div>' + attachment + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
 }
 
 async function openConversation(id) {
@@ -71,7 +93,8 @@ function render() {
   const shortcuts = (state.quickReplies || []).map(reply => '<button class="quick" data-quick="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('');
   const quickDock = '<div class="quickDock"><button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette">' + shortcuts + '</div></div>';
   const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox"><span class="tag">SGP</span><h3>Dados do cliente</h3><p class="muted">Quando o cadastro não for localizado no SGP, os campos permanecem nulos e este atendimento pode ser tratado como uma nova contratação.</p><dl class="clientData"><dt>Contrato</dt><dd>Não informado</dd><dt>Endereço</dt><dd>Não informado</dd><dt>Plano</dt><dd>Não informado</dd></dl><a class="btn" href="https://cadastro.sgfibra.com.br" target="_blank" rel="noopener">Abrir cadastro SG Fibra</a></div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
-  const chat = conversation ? '<section class="chat"><div class="mobileChatNav"><button class="btn subtle" id="backToList">← Conversas</button><button class="btn subtle" id="showClient">Dados do cliente</button></div><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span></div><div class="chatActions"><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="quickRow"><span class="muted">Mensagens rápidas</span>' + shortcuts + '</div><div class="messages">' + messages.map(message => '<div class="message ' + (message.direction === 'outbound' ? 'outbound' : '') + '">' + esc(message.body) + '<small>' + esc(message.author_name || 'Cliente') + '</small></div>').join('') + '</div><form class="composer" id="send"><textarea name="body" placeholder="Escreva uma mensagem simulada"></textarea><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
+  const replyPreview = replyTo ? '<div class="replyPreview"><span>Respondendo: ' + esc(replyTo.body) + '</span><button type="button" id="cancelReply">×</button></div>' : '';
+  const chat = conversation ? '<section class="chat"><div class="mobileChatNav"><button class="btn subtle" id="backToList">← Conversas</button><button class="btn subtle" id="showClient">Dados do cliente</button></div><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span><button class="linkButton" id="renameContact">Editar nome</button></div><div class="chatActions"><button class="btn subtle" id="internalNote">🔒 Nota interna</button><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="messages">' + messages.map(messageHtml).join('') + '</div>' + replyPreview + '<form class="composer" id="send"><input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf" hidden><button class="attachButton" id="attachButton" type="button" title="Anexar foto, vídeo ou PDF">＋</button><textarea name="body" placeholder="Escreva uma mensagem"></textarea><span class="attachmentName" id="attachmentName"></span><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
   app.innerHTML = shell(inbox + chat + client);
   document.querySelector('.shell').dataset.mobilePane = mobilePane;
   const clientPanel = document.querySelector('.clientPanel');
@@ -142,6 +165,14 @@ async function automationEditor() {
 }
 
 function bindConversation(conversation) {
+  document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
+  document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment]')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
+  if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
+  document.querySelector('#renameContact').onclick = async () => { const name=prompt('Nome do contato',conversation.contact_name); if(!name)return; try{await api('/api/conversations/'+conversation.id+'/contact',{method:'PATCH',body:JSON.stringify({name})});await boot();await openConversation(conversation.id);}catch(error){alert(error.message);} };
+  document.querySelector('#internalNote').onclick = async () => { const body=prompt('Anotação interna (não será enviada ao cliente)');if(!body)return;try{await api('/api/conversations/'+conversation.id+'/internal-notes',{method:'POST',body:JSON.stringify({body})});await openConversation(conversation.id);}catch(error){alert(error.message);} };
+  const attachmentInput=document.querySelector('#attachmentInput');
+  document.querySelector('#attachButton').onclick=()=>attachmentInput.click();
+  attachmentInput.onchange=()=>{const file=attachmentInput.files?.[0];document.querySelector('#attachmentName').textContent=file?'📎 '+file.name:'';};
   const quickToggle = document.querySelector('#quickToggle');
   if (quickToggle) quickToggle.onclick = () => document.querySelector('#quickPalette').classList.toggle('visible');
   const composer = document.querySelector('#send');
@@ -156,7 +187,14 @@ function bindConversation(conversation) {
   document.querySelector('#send').onsubmit = async event => {
     event.preventDefault();
     try {
-      await api('/api/conversations/' + conversation.id + '/messages', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
+      const file=attachmentInput.files?.[0];
+      if(file&&file.size>10*1024*1024)throw Error('O arquivo deve possuir no máximo 10 MB.');
+      let attachment=null;
+      if(file){const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('Não foi possível ler o arquivo.'));reader.readAsDataURL(file);});attachment={name:file.name,type:file.type,data};}
+      const payload={body:new FormData(event.target).get('body'),reply_to_id:replyTo?.id||null,attachment};
+      const button=event.submitter;button.disabled=true;button.textContent='Enviando…';
+      await api('/api/conversations/' + conversation.id + '/messages', { method: 'POST', body: JSON.stringify(payload) });
+      replyTo=null;
       await boot();
       await openConversation(conversation.id);
     } catch (error) { alert(error.message); }
@@ -200,10 +238,12 @@ async function settings() {
   const queues = data.departments.map(department => '<li>' + esc(department.name) + ' <small class="muted">(' + esc(department.id) + ')</small></li>').join('');
   const replies = data.replies.map(reply => '<li><b>' + esc(reply.shortcut) + '</b> · ' + esc(reply.body) + '</li>').join('');
   const managerForms = manager ? '<div class="settingsGrid"><form class="card" id="agentForm"><h3>Novo atendente</h3><label class="field">Nome<input name="name"></label><label class="field">E-mail<input name="email" type="email"></label><label class="field">Senha inicial<input name="password" type="password"></label><label class="field">Perfil<select name="role"><option value="agent">Atendente</option><option value="supervisor">Supervisor</option></select></label><button class="btn">Cadastrar atendente</button></form><form class="card" id="queueForm"><h3>Nova fila</h3><label class="field">Nome da fila<input name="name" placeholder="Instalação, reparo, dúvida ou financeiro"></label><button class="btn">Criar fila</button></form><form class="card" id="autoForm"><h3>Robô de atendimento</h3><label class="field">Mensagem inicial<textarea name="welcome_message">' + esc(data.settings?.welcome_message) + '</textarea></label><label class="field">Encaminhamento para fila<textarea name="fallback_message">' + esc(data.settings?.fallback_message) + '</textarea></label><label class="field">Tentativas antes de encaminhar<input name="max_attempts" type="number" min="1" max="5" value="' + esc(data.settings?.max_attempts || 2) + '"></label><button class="btn">Salvar robô</button></form><form class="card" id="quickForm"><h3>Mensagem rápida</h3><label class="field">Atalho<input name="shortcut" placeholder="/reparo"></label><label class="field">Mensagem<textarea name="body"></textarea></label><label class="field">Fila<select name="department_id"><option value="">Todas</option>' + data.departments.map(item => '<option value="' + esc(item.id) + '">' + esc(item.name) + '</option>').join('') + '</select></label><button class="btn">Adicionar resposta</button></form></div>' : '<p class="card">Seu perfil permite usar as filas e respostas. Um supervisor pode alterar cadastro de equipe, robô e automações.</p>';
-  app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Configurações de atendimento</h2><p class="muted">Filas, equipe, mensagens rápidas e regras do robô são separadas por empresa.</p></div><div><button class="btn subtle" id="back">Voltar à caixa</button>' + channelButton + '</div></div>' + managerForms + '<div class="settingsGrid"><article class="card"><h3>Atendentes</h3><ul>' + agents + '</ul></article><article class="card"><h3>Filas configuradas</h3><ul>' + queues + '</ul></article><article class="card"><h3>Mensagens rápidas</h3><ul>' + replies + '</ul></article></div></section>', 'Configurações');
+  const profileForm='<form class="card profileForm" id="profileForm"><h3>Meu nome no atendimento</h3><p class="muted">Esse nome aparece em negrito no topo das mensagens enviadas.</p><label class="field">Nome de exibição obrigatório<input name="display_name" required value="'+esc(state.profile.display_name||state.profile.name)+'"></label><label class="field">Telefone interno<input name="phone" value="'+esc(state.profile.phone||'')+'"></label><button class="btn">Salvar perfil</button></form>';
+  app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Configurações de atendimento</h2><p class="muted">Filas, equipe, mensagens rápidas e regras do robô são separadas por empresa.</p></div><div><button class="btn subtle" id="back">Voltar à caixa</button>' + channelButton + '</div></div><div class="settingsGrid">'+profileForm+'</div>' + managerForms + '<div class="settingsGrid"><article class="card"><h3>Atendentes</h3><ul>' + agents + '</ul></article><article class="card"><h3>Filas configuradas</h3><ul>' + queues + '</ul></article><article class="card"><h3>Mensagens rápidas</h3><ul>' + replies + '</ul></article></div></section>', 'Configurações');
   bindShell();
   document.querySelector('#back').onclick = render;
   if (document.querySelector('#whatsapp')) document.querySelector('#whatsapp').onclick = whatsapp;
+  document.querySelector('#profileForm').onsubmit=event=>submit(event,'/api/profile',async()=>{await boot();settings();},'PATCH');
   if (manager) {
     document.querySelector('#agentForm').onsubmit = event => submit(event, '/api/agents', settings);
     document.querySelector('#queueForm').onsubmit = event => submit(event, '/api/queues', settings);
@@ -212,10 +252,10 @@ async function settings() {
   }
 }
 
-async function submit(event, path, after) {
+async function submit(event, path, after, method='POST') {
   event.preventDefault();
   try {
-    await api(path, { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
+    await api(path, { method, body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
     await after();
   } catch (error) { alert(error.message); }
 }

@@ -5,6 +5,7 @@ node_modules/
 data/
 backups/
 apps/connector/sessions/
+apps/connector/sessions-backup-*/
 apps/connector/*.log
 *.log
 .render/

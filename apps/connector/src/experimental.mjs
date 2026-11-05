@@ -17,6 +17,7 @@ let starting = null;
 let manualDisconnect = false;
 let pairingReadyWaiters = [];
 let authRegistered = false;
+let reconnectTimer = null;
 const pairing = createPairingController();
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
@@ -25,6 +26,7 @@ const numberFromJid = jid => String(jid || '').split('@')[0].split(':')[0].repla
 const publicState = () => { const p=pairing.snapshot(); return { status: p.expired && state.status === 'PAIRING_CODE' ? 'PAIRING_EXPIRED' : state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size, pairing: p }; };
 
 async function connect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   await mkdir(sessionDirectory, { recursive: true });
   const auth = await useMultiFileAuthState(sessionDirectory);
   authRegistered = Boolean(auth.state.creds.registered);
@@ -52,11 +54,11 @@ async function connect() {
     if (update.connection === 'close') {
       state.qr = null; pairing.clear();
       await auth.saveCreds();
-      const code = update.lastDisconnect?.error?.output?.statusCode;
+      const code = update.lastDisconnect?.error?.output?.statusCode ?? update.lastDisconnect?.error?.statusCode;
       state.status = manualDisconnect ? 'DISCONNECTED' : code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
       state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
-      if (!manualDisconnect && code !== DisconnectReason.loggedOut) setTimeout(() => { if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
+      if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
     }
   });
   current.ev.on('messages.upsert', ({ messages, type }) => {
@@ -133,8 +135,19 @@ const server = createServer(async (request, response) => {
     if (request.headers['x-connector-token'] !== connectorToken) return json(response, 401, { error: 'Conector não autorizado.' });
     const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
     if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
-    if (!phone || !text) return json(response, 400, { error: 'Telefone e texto são obrigatórios.' });
-    const jid = phone + '@s.whatsapp.net'; const result = await socket.sendMessage(jid, { text });
+    if (!phone || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Telefone e conteúdo são obrigatórios.' });
+    const jid = phone + '@s.whatsapp.net';
+    const contextInfo = input.reply?.provider_message_id ? { stanzaId: input.reply.provider_message_id, participant: jid, quotedMessage: { conversation: String(input.reply.body || '') } } : undefined;
+    let payload = { text, ...(contextInfo ? { contextInfo } : {}) };
+    if (input.attachment?.data) {
+      const buffer = Buffer.from(input.attachment.data, 'base64');
+      const mimetype = String(input.attachment.type || 'application/octet-stream');
+      const fileName = String(input.attachment.name || 'arquivo');
+      if (mimetype.startsWith('image/')) payload = { image: buffer, caption: text, mimetype, ...(contextInfo ? { contextInfo } : {}) };
+      else if (mimetype.startsWith('video/')) payload = { video: buffer, caption: text, mimetype, ...(contextInfo ? { contextInfo } : {}) };
+      else payload = { document: buffer, caption: text, mimetype, fileName, ...(contextInfo ? { contextInfo } : {}) };
+    }
+    const result = await socket.sendMessage(jid, payload);
     return json(response, 200, { ok: true, messageId: result?.key?.id || null });
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/disconnect') {
@@ -152,4 +165,7 @@ const server = createServer(async (request, response) => {
   }
   json(response, 404, { error: 'Rota não encontrada.' });
 });
-server.listen(port, '127.0.0.1', () => console.log('WhatsApp experimental em http://127.0.0.1:' + port));
+server.listen(port, '127.0.0.1', () => {
+  console.log('WhatsApp experimental em http://127.0.0.1:' + port);
+  ensureConnected().catch(error => { state.status='ERROR'; state.lastError=error.message; });
+});
