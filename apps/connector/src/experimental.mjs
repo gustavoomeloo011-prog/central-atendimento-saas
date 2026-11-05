@@ -79,6 +79,14 @@ async function connect() {
       }).catch(error => console.error(JSON.stringify({ type: 'bridge_error', sender, error: error.message })));
     }
   });
+  current.ev.on('messages.update', updates => {
+    for(const item of updates||[]){
+      if(!item.key?.fromMe||!item.key?.id||!connectorToken)continue;
+      const numeric=Number(item.update?.status||0);
+      const status=numeric>=4?'read':numeric>=3?'delivered':'sent';
+      fetch(centralApiUrl+'/api/internal/whatsapp/delivery',{method:'POST',headers:{'content-type':'application/json','x-connector-token':connectorToken},body:JSON.stringify({company_id:companyId,message_id:item.key.id,status})}).catch(()=>{});
+    }
+  });
 }
 async function ensureConnected() {
   manualDisconnect = false;
