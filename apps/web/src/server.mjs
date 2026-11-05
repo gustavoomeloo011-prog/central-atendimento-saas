@@ -42,6 +42,24 @@ if (!db.prepare('select count(*) total from automation_settings').get().total) {
     "insert into quick_replies values('qr1','isp','/sem_sinal','Vou verificar as informações disponíveis sobre sua conexão.','support'),('qr2','isp','/financeiro','Vou encaminhar sua solicitação ao financeiro.','billing'),('qr3','store','/entrega','Vou verificar a disponibilidade de entrega na sua região.','sales');");
 }
 
+// Extensões compatíveis: nunca removem dados existentes.
+const profileColumns = db.prepare('pragma table_info(profiles)').all().map(column => column.name);
+if (!profileColumns.includes('display_name')) db.exec("alter table profiles add column display_name text");
+if (!profileColumns.includes('avatar_url')) db.exec("alter table profiles add column avatar_url text");
+if (!profileColumns.includes('phone')) db.exec("alter table profiles add column phone text");
+if (!profileColumns.includes('department_id')) db.exec("alter table profiles add column department_id text");
+if (!profileColumns.includes('created_at')) db.exec("alter table profiles add column created_at text");
+if (!profileColumns.includes('last_seen_at')) db.exec("alter table profiles add column last_seen_at text");
+const conversationColumns = db.prepare('pragma table_info(conversations)').all().map(column => column.name);
+if (!conversationColumns.includes('protocol')) db.exec("alter table conversations add column protocol text");
+if (!conversationColumns.includes('closed_at')) db.exec("alter table conversations add column closed_at text");
+if (!conversationColumns.includes('human_started_at')) db.exec("alter table conversations add column human_started_at text");
+db.exec('create unique index if not exists idx_conversations_protocol on conversations(protocol);' +
+  'create table if not exists internal_notes(id text primary key,company_id text not null,conversation_id text not null,profile_id text,body text not null,created_at text not null);' +
+  'create table if not exists conversation_ratings(id text primary key,company_id text not null,conversation_id text not null,protocol text,stars integer not null,comment text,created_at text not null);');
+const protocolFor = (companyId, id) => { const existing = db.prepare('select protocol from conversations where id=? and company_id=?').get(id, companyId)?.protocol; if (existing) return existing; const day = new Date().toISOString().slice(0,10).replaceAll('-', ''); const count = db.prepare('select count(*) total from conversations where company_id=?').get(companyId).total; const protocol = day + '-' + String(count).padStart(6, '0'); db.prepare('update conversations set protocol=? where id=? and company_id=?').run(protocol, id, companyId); return protocol; };
+for (const row of db.prepare('select id,company_id from conversations where protocol is null').all()) protocolFor(row.company_id, row.id);
+
 const sessions = new Map();
 const respond = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 const parseBody = request => new Promise((resolve, reject) => { let raw = ''; request.on('data', part => raw += part); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('JSON inválido')); } }); });
@@ -86,6 +104,7 @@ const server = createServer(async (request, response) => {
       db.prepare('insert into conversations(id,company_id,department_id,assigned_profile_id,contact_name,contact_phone,subject,status,priority,created_at,updated_at,queue_type,bot_attempts) values(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, companyId, department.id, null, input.name || phone, phone, 'WhatsApp', 'waiting', 'normal', now, now, department.id, 0);
       conversation = db.prepare('select * from conversations where id=?').get(id);
     }
+    const protocol = protocolFor(companyId, conversation.id);
     const settings = db.prepare('select * from automation_settings where company_id=?').get(companyId);
     const inboundCount = db.prepare("select count(*) total from messages where conversation_id=? and direction='inbound'").get(conversation.id).total + 1;
     db.prepare('insert into messages values(?,?,?,?,?,?,?)').run(randomUUID(), companyId, conversation.id, null, body, 'inbound', now);
@@ -100,7 +119,7 @@ const server = createServer(async (request, response) => {
       db.prepare('update conversations set status=?,bot_attempts=?,updated_at=? where id=?').run('open', inboundCount, now, conversation.id);
       reply = settings.welcome_message;
     }
-    return respond(response, 201, { ok: true, conversation_id: conversation.id, reply, queued: Boolean(financial || reachedLimit) });
+    return respond(response, 201, { ok: true, conversation_id: conversation.id, protocol, reply, queued: Boolean(financial || reachedLimit) });
   }
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/outbound') {
     if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return respond(response, 401, { error: 'Conector não autorizado.' });
@@ -212,6 +231,7 @@ const server = createServer(async (request, response) => {
   const selected = getConversation(session, id);
   if (!selected) return respond(response, 404, { error: 'Conversa não encontrada.' });
   if (request.method === 'GET' && pieces.length === 3) {
+    protocolFor(companyId, id);
     const messages = db.prepare("select m.*,coalesce(p.name,'Cliente') || ' · ' || substr(m.created_at,12,5) || case when m.direction='outbound' then ' · ✓✓' else '' end author_name from messages m left join profiles p on p.id=m.profile_id where m.conversation_id=? and m.company_id=? order by m.created_at").all(id, companyId);
     return respond(response, 200, { conversation: selected, messages });
   }
