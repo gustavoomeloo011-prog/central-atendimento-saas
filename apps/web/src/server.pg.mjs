@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createPersistence } from './persistence.mjs';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
+import { dispatchConnector, syncConnector } from './connector-bridge.mjs';
 import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
 
 const db = createPersistence();
@@ -36,7 +37,7 @@ const validConnector = request => { const a = Buffer.from(String(request.headers
 const conversation = (company, id) => db.one('select * from public.conversations where company_id=$1 and id=$2',[company,id]);
 async function connectorSend(payload) {
   const response = await fetch(`http://127.0.0.1:${Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200)}/api/whatsapp/send`, { method:'POST', headers:{'content-type':'application/json','x-connector-token':process.env.WHATSAPP_CONNECTOR_TOKEN||''}, body:JSON.stringify(payload), signal:AbortSignal.timeout(20_000) }).catch(() => null);
-  if (!response) throw Object.assign(new Error('Conector local indisponível.'),{status:503});
+  if (!response) return dispatchConnector(process.env.WHATSAPP_COMPANY_ID, 'send', 'POST', {...payload,company_id:process.env.WHATSAPP_COMPANY_ID});
   const result = await response.json().catch(()=>({}));
   if (!response.ok) throw Object.assign(new Error(result.error||'Falha no envio ao WhatsApp.'),{status:response.status});
   return result;
@@ -76,6 +77,12 @@ async function handle(request, response) {
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) { response.writeHead(200, {'content-type':'text/html; charset=utf-8'}); return response.end(await readFile(join(publicDir,'index.html'))); }
   if (request.method === 'GET' && url.pathname.startsWith('/assets/')) { const file = join(publicDir, url.pathname.slice(8)); if (!existsSync(file)) return json(response,404,{error:'Arquivo não encontrado.'}); response.writeHead(200,{'content-type':file.endsWith('.css')?'text/css':'application/javascript'}); return response.end(await readFile(file)); }
   if (request.method === 'GET' && url.pathname === '/health') { await db.one('select 1 ok'); return json(response,200,{backend:'online',database:'online'}); }
+  if (request.method === 'POST' && url.pathname === '/api/internal/connector/sync') {
+    if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
+    const input = await body(request), company = String(input.company_id || '');
+    if (!company || company !== process.env.WHATSAPP_COMPANY_ID) return json(response,403,{error:'Empresa não autorizada.'});
+    return json(response,200,syncConnector(company,input));
+  }
   if (request.method === 'POST' && url.pathname === '/api/login') {
     const input = await body(request);
     const entered = String(input.email||'').trim().toLowerCase();

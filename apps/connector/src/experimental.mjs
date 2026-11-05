@@ -9,6 +9,7 @@ const port = Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200);
 const sessionDirectory = process.env.WHATSAPP_SESSION_DIR || join(process.cwd(), 'apps', 'connector', 'sessions');
 const allowedNumbers = new Set(String(process.env.WHATSAPP_ALLOWED_NUMBERS || '').split(',').map(value => value.replace(/\D/g, '')).filter(Boolean));
 const centralApiUrl = String(process.env.CENTRAL_API_URL || 'http://localhost:3100').replace(/\/$/, '');
+const remoteBackendUrl = String(process.env.REMOTE_BACKEND_URL || '').replace(/\/$/, '');
 const connectorToken = String(process.env.WHATSAPP_CONNECTOR_TOKEN || '');
 const companyId = String(process.env.WHATSAPP_COMPANY_ID || 'isp');
 const state = { status: 'DISCONNECTED', qr: null, phone: null, profileName: null, lastError: null, autoReplyEnabled: false, connectedAt: null, syncStatus: 'idle' };
@@ -19,6 +20,7 @@ let pairingReadyWaiters = [];
 let authRegistered = false;
 let reconnectTimer = null;
 const pairing = createPairingController();
+let remoteResults = [];
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
 const parse = request => new Promise(resolve => { let raw = ''; request.on('data', chunk => raw += chunk); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } }); });
@@ -181,3 +183,30 @@ server.listen(port, '127.0.0.1', () => {
   console.log('WhatsApp experimental em http://127.0.0.1:' + port);
   ensureConnected().catch(error => { state.status='ERROR'; state.lastError=error.message; });
 });
+
+async function syncRemoteBridge() {
+  if (!remoteBackendUrl || !connectorToken) return;
+  try {
+    const response = await fetch(remoteBackendUrl + '/api/internal/connector/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken },
+      body: JSON.stringify({ company_id: companyId, state: publicState(), results: remoteResults.splice(0) }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return;
+    const result = await response.json();
+    for (const command of result.commands || []) {
+      try {
+        const local = await fetch(`http://127.0.0.1:${port}/api/whatsapp/${command.action}`, {
+          method: command.method || 'POST',
+          headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken },
+          body: command.method === 'GET' ? undefined : JSON.stringify(command.data || {}),
+        });
+        const payload = await local.json().catch(() => ({}));
+        remoteResults.push({ id: command.id, ok: local.ok, status: local.status, body: payload });
+      } catch (error) { remoteResults.push({ id: command.id, ok: false, status: 502, body: { error: error.message } }); }
+    }
+  } catch {}
+}
+setInterval(syncRemoteBridge, 1500).unref();
+syncRemoteBridge();

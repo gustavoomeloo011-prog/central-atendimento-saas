@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile
-    startCommand: pnpm dev
+    startCommand: pnpm dev:pg
     healthCheckPath: /
     envVars:
       - key: NODE_VERSION
