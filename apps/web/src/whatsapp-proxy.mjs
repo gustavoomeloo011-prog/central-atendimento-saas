@@ -10,6 +10,16 @@ export async function proxyWhatsApp(request, response, companyId) {
   let data = {};
   try { data = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { response.writeHead(400); response.end(); return; }
   if (action === 'status') {
+    if (process.env.BAILEYS_CLOUD_ENABLED === 'true') {
+      try {
+        const local = await fetch(target, { headers: { 'x-connector-token': secret }, signal: AbortSignal.timeout(3000) });
+        if (local.ok) {
+          const payload = await local.json();
+          response.writeHead(200, {'content-type':'application/json; charset=utf-8'});
+          return response.end(JSON.stringify({ ...payload, connectorOnline: true, bridge: 'CLOUD' }));
+        }
+      } catch {}
+    }
     response.writeHead(200,{'content-type':'application/json; charset=utf-8'});
     response.end(JSON.stringify(connectorSnapshot(companyId)));
     return;
