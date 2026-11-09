@@ -10,7 +10,19 @@ export function createPersistence(connectionString = process.env.DATABASE_URL) {
   if (caInline) ca = caInline.replace(/\\n/g, '\n');
   else if (caPath) ca = readFileSync(caPath, 'utf8');
   const ssl = connectionString.includes('localhost') ? false : { rejectUnauthorized, ...(ca ? { ca } : {}) };
-  const pool = new pg.Pool({ connectionString, max: 10, ssl });
+  // Supabase connection strings may include sslmode/sslrootcert query parameters.
+  // pg gives those URL parameters precedence over the explicit ssl object, so
+  // strip only the TLS options and apply the verified configuration above.
+  let poolConnectionString = connectionString;
+  try {
+    const parsed = new URL(connectionString);
+    parsed.searchParams.delete('sslmode');
+    parsed.searchParams.delete('sslrootcert');
+    parsed.searchParams.delete('sslcert');
+    parsed.searchParams.delete('sslkey');
+    poolConnectionString = parsed.toString();
+  } catch { /* pg will report malformed connection strings normally */ }
+  const pool = new pg.Pool({ connectionString: poolConnectionString, max: 10, ssl });
   const query = async (sql, values = []) => (await pool.query(sql, values)).rows;
   const one = async (sql, values = []) => (await query(sql, values))[0] || null;
   const transaction = async work => {
