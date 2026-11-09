@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile
-    startCommand: pnpm dev
+    startCommand: pnpm dev:pg
     healthCheckPath: /
     envVars:
       - key: NODE_VERSION
@@ -24,4 +24,10 @@ services:
       - key: WHATSAPP_CONNECTOR_URL
         sync: false
       - key: WHATSAPP_CONNECTOR_TOKEN
+        sync: false
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_WABA_ID
         sync: false

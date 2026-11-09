@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createPersistence } from './persistence.mjs';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 import { dispatchConnector, syncConnector } from './connector-bridge.mjs';
@@ -17,6 +17,7 @@ const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!supabaseUrl || !anonKey || !serviceKey) throw new Error('SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY são obrigatórias.');
 const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 const body = request => new Promise((resolve, reject) => { let raw = '', failed = false; request.on('data', p => { if (failed) return; raw += p; if (raw.length > 15_000_000) { failed = true; reject(Object.assign(new Error('Arquivo maior que o limite de 10 MB.'),{status:413})); } }); request.on('end', () => { if (failed) return; try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(Object.assign(new Error('JSON inválido'),{status:400})); } }); });
+const rawBody = request => new Promise((resolve, reject) => { const chunks = []; let size = 0; request.on('data', chunk => { size += chunk.length; if (size > 1_000_000) return reject(Object.assign(new Error('Webhook maior que o limite permitido.'), { status: 413 })); chunks.push(Buffer.from(chunk)); }); request.on('end', () => resolve(Buffer.concat(chunks))); request.on('error', reject); });
 async function authRequest(path, method, payload, key = anonKey, bearer = key) {
   const response = await fetch(`${supabaseUrl}/auth/v1/${path}`, { method, headers: { apikey: key, authorization: `Bearer ${bearer}`, 'content-type': 'application/json' }, body: payload ? JSON.stringify(payload) : undefined });
   const result = await response.json().catch(() => ({}));
@@ -34,6 +35,8 @@ async function sessionFor(request) {
 const admin = session => ['supervisor','company_admin','superadmin'].includes(session.profile.role);
 const audit = (tx, session, action, id, type = 'conversation') => tx.query('insert into public.audit_events(id,company_id,profile_id,action,entity_type,entity_id) values($1,$2,$3,$4,$5,$6)', [randomUUID(), session.profile.company_id, session.profile.id, action, type, id]);
 const validConnector = request => { const a = Buffer.from(String(request.headers['x-connector-token'] || '')); const b = Buffer.from(String(process.env.WHATSAPP_CONNECTOR_TOKEN || '')); return b.length > 0 && a.length === b.length && timingSafeEqual(a,b); };
+const safeEqualText = (left, right) => { const a = Buffer.from(String(left || '')); const b = Buffer.from(String(right || '')); return a.length > 0 && a.length === b.length && timingSafeEqual(a, b); };
+const validMetaSignature = (request, raw) => { const secret = process.env.META_APP_SECRET || ''; const signature = String(request.headers['x-hub-signature-256'] || ''); if (!secret || !/^sha256=[a-f0-9]{64}$/i.test(signature)) return false; return safeEqualText(signature, `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`); };
 const conversation = (company, id) => db.one('select * from public.conversations where company_id=$1 and id=$2',[company,id]);
 async function connectorSend(payload) {
   const response = await fetch(`http://127.0.0.1:${Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200)}/api/whatsapp/send`, { method:'POST', headers:{'content-type':'application/json','x-connector-token':process.env.WHATSAPP_CONNECTOR_TOKEN||''}, body:JSON.stringify(payload), signal:AbortSignal.timeout(20_000) }).catch(() => null);
@@ -77,6 +80,60 @@ async function handle(request, response) {
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) { response.writeHead(200, {'content-type':'text/html; charset=utf-8'}); return response.end(await readFile(join(publicDir,'index.html'))); }
   if (request.method === 'GET' && url.pathname.startsWith('/assets/')) { const file = join(publicDir, url.pathname.slice(8)); if (!existsSync(file)) return json(response,404,{error:'Arquivo não encontrado.'}); response.writeHead(200,{'content-type':file.endsWith('.css')?'text/css':'application/javascript'}); return response.end(await readFile(file)); }
   if (request.method === 'GET' && url.pathname === '/health') { await db.one('select 1 ok'); return json(response,200,{backend:'online',database:'online'}); }
+  if (url.pathname === '/api/webhooks/meta/whatsapp' && request.method === 'GET') {
+    const mode = url.searchParams.get('hub.mode');
+    const verifyToken = url.searchParams.get('hub.verify_token');
+    const challenge = url.searchParams.get('hub.challenge');
+    if (mode === 'subscribe' && safeEqualText(verifyToken, process.env.META_WEBHOOK_VERIFY_TOKEN) && challenge) {
+      response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      return response.end(challenge);
+    }
+    return json(response, 403, { error: 'Verificação do webhook recusada.' });
+  }
+  if (url.pathname === '/api/webhooks/meta/whatsapp' && request.method === 'POST') {
+    const raw = await rawBody(request);
+    if (!validMetaSignature(request, raw)) return json(response, 401, { error: 'Assinatura do webhook inválida.' });
+    let input; try { input = JSON.parse(raw.toString('utf8')); } catch { return json(response, 400, { error: 'JSON inválido.' }); }
+    const company = String(process.env.WHATSAPP_COMPANY_ID || '');
+    if (!company) return json(response, 503, { error: 'Empresa do WhatsApp não configurada.' });
+    const expectedWaba = String(process.env.META_WABA_ID || '');
+    const entries = Array.isArray(input.entry) ? input.entry : [];
+    if (expectedWaba && entries.some(entry => String(entry.id || '') !== expectedWaba)) return json(response, 403, { error: 'WABA não autorizada.' });
+    let processed = 0, duplicates = 0;
+    await db.transaction(async tx => {
+      for (const entry of entries) for (const change of (entry.changes || [])) {
+        const value = change.value || {};
+        for (const status of (value.statuses || [])) {
+          const eventId = `status:${status.id}:${status.status}`;
+          const claimed = await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,null,$4,now()) on conflict (event_id) do nothing returning event_id', [eventId, company, 'meta.status', status]);
+          if (!claimed) { duplicates++; continue; }
+          await tx.query('update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and provider_message_id=$4', [String(status.status || 'unknown'), status.errors?.[0]?.title || status.errors?.[0]?.message || null, company, String(status.id || '')]);
+          processed++;
+        }
+        for (const message of (value.messages || [])) {
+          const providerId = String(message.id || '');
+          if (!providerId) continue;
+          const claimed = await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,$4,$5,now()) on conflict (event_id) do nothing returning event_id', [`message:${providerId}`, company, 'meta.message', providerId, message]);
+          if (!claimed) { duplicates++; continue; }
+          const phone = String(message.from || '').replace(/\D/g, '');
+          const text = message.type === 'text' ? String(message.text?.body || '').trim() : `[Mensagem ${message.type || 'não suportada'}]`;
+          if (!phone || !text) continue;
+          let c = await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update", [company, phone]);
+          if (!c) {
+            const department = await tx.one('select id from public.departments where company_id=$1 order by id limit 1', [company]);
+            if (!department) continue;
+            const id = randomUUID();
+            const protocol = (await tx.one('select public.next_protocol($1) protocol', [company])).protocol;
+            c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7) returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
+          }
+          await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
+          await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
+          processed++;
+        }
+      }
+    });
+    return json(response, 200, { ok: true, processed, duplicates });
+  }
   if (request.method === 'POST' && url.pathname === '/api/internal/connector/sync') {
     if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
     const input = await body(request), company = String(input.company_id || '');
