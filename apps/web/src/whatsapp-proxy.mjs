@@ -5,6 +5,7 @@ export async function proxyWhatsApp(request, response, companyId) {
   const secret = process.env.WHATSAPP_CONNECTOR_TOKEN;
   const configuredCompany = process.env.WHATSAPP_COMPANY_ID || 'isp';
   if (companyId !== configuredCompany) { response.writeHead(403,{'content-type':'application/json'}); response.end(JSON.stringify({error:'Conector indisponível para esta empresa.'})); return; }
+  const target = `http://127.0.0.1:${Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200)}/api/whatsapp/${action}`;
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   let data = {};
@@ -24,7 +25,6 @@ export async function proxyWhatsApp(request, response, companyId) {
     response.end(JSON.stringify(connectorSnapshot(companyId)));
     return;
   }
-  const target = `http://127.0.0.1:${Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200)}/api/whatsapp/${action}`;
   try {
     const upstream = await fetch(target,{method:request.method,headers:{'content-type':'application/json','x-connector-token':secret},body:request.method==='GET'?undefined:JSON.stringify({...data,company_id:companyId}),signal:AbortSignal.timeout(10_000)});
     response.writeHead(upstream.status,{'content-type':'application/json; charset=utf-8'});
