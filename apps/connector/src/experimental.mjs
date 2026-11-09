@@ -29,6 +29,8 @@ const numberFromJid = jid => {
   const value=String(jid||''),digits=value.split('@')[0].split(':')[0].replace(/\D/g,'');
   return value.endsWith('@s.whatsapp.net') ? digits.slice(0,15) : digits;
 };
+const validRecipientJid = value => /^(?:\d+@(s\.whatsapp\.net|lid)|[\d-]+:[\d-]+@(s\.whatsapp\.net|lid))$/i.test(String(value || '')) ? String(value) : null;
+const recipientJid = input => validRecipientJid(input.jid) || (/^55\d{10,11}$/.test(String(input.phone || '').replace(/\D/g, '')) ? String(input.phone).replace(/\D/g, '') + '@s.whatsapp.net' : null);
 const publicState = () => { const p=pairing.snapshot(); return { status: p.expired && state.status === 'PAIRING_CODE' ? 'PAIRING_EXPIRED' : state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size, pairing: p }; };
 
 async function connect() {
@@ -156,9 +158,10 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/send') {
     if (request.headers['x-connector-token'] !== connectorToken) return json(response, 401, { error: 'Conector não autorizado.' });
     const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
-    if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
-    if (!phone || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Telefone e conteúdo são obrigatórios.' });
-    const jid = /^55\d{10,11}$/.test(phone) ? phone + '@s.whatsapp.net' : /@(s\.whatsapp\.net|lid)$/.test(String(input.jid||'')) ? String(input.jid) : phone + '@s.whatsapp.net';
+    if (state.status !== 'CONNECTED' || !socket || socket.ws?.readyState !== 1) return json(response, 409, { error: 'WhatsApp desconectado.' });
+    if ((!phone && !validRecipientJid(input.jid)) || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Destinatário e conteúdo são obrigatórios.' });
+    const jid = recipientJid(input);
+    if (!jid) return json(response, 400, { error: 'Identificador WhatsApp inválido.' });
     const contextInfo = input.reply?.provider_message_id ? { stanzaId: input.reply.provider_message_id, participant: jid, quotedMessage: { conversation: String(input.reply.body || '') } } : undefined;
     let payload = { text, ...(contextInfo ? { contextInfo } : {}) };
     if (input.attachment?.data) {
@@ -169,8 +172,16 @@ const server = createServer(async (request, response) => {
       else if (mimetype.startsWith('video/')) payload = { video: buffer, caption: text, mimetype, ...(contextInfo ? { contextInfo } : {}) };
       else payload = { document: buffer, caption: text, mimetype, fileName, ...(contextInfo ? { contextInfo } : {}) };
     }
-    const result = await socket.sendMessage(jid, payload);
-    return json(response, 200, { ok: true, messageId: result?.key?.id || null });
+    const correlationId = String(input.correlation_id || '');
+    try {
+      const result = await socket.sendMessage(jid, payload);
+      const messageId = result?.key?.id || null;
+      console.log(JSON.stringify({ type: 'outbound_accepted', correlationId, jidType: jid.endsWith('@lid') ? 'lid' : 'phone', messageId }));
+      return json(response, 200, { ok: true, messageId });
+    } catch (error) {
+      console.error(JSON.stringify({ type: 'outbound_failed', correlationId, jidType: jid.endsWith('@lid') ? 'lid' : 'phone', error: error?.message || 'sendMessage failed' }));
+      return json(response, 502, { error: 'WhatsApp recusou o envio.', detail: error?.message || 'sendMessage failed' });
+    }
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/disconnect') {
     manualDisconnect = true; pairing.clear();
