@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import { createPairingController } from './pairing.mjs';
+import { createSqlAuthState } from './sql-auth-state.mjs';
 
 const port = Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200);
 const sessionDirectory = process.env.WHATSAPP_SESSION_DIR || join(process.cwd(), 'apps', 'connector', 'sessions');
@@ -32,8 +33,14 @@ const publicState = () => { const p=pairing.snapshot(); return { status: p.expir
 
 async function connect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  await mkdir(sessionDirectory, { recursive: true });
-  const auth = await useMultiFileAuthState(sessionDirectory);
+  let auth;
+  if (process.env.BAILEYS_SQL_STATE === 'true') {
+    auth = await createSqlAuthState();
+    await auth.acquireLease();
+  } else {
+    await mkdir(sessionDirectory, { recursive: true });
+    auth = await useMultiFileAuthState(sessionDirectory);
+  }
   authRegistered = Boolean(auth.state.creds.registered);
   state.status = auth.state.creds.registered ? 'CONNECTING' : 'QR_PENDING';
   state.lastError = null;
@@ -63,6 +70,7 @@ async function connect() {
       state.status = manualDisconnect ? 'DISCONNECTED' : code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
       state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
+      await auth.close?.();
       if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
     }
   });
