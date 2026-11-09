@@ -8,6 +8,7 @@ import { createPersistence } from './persistence.mjs';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 import { dispatchConnector, syncConnector } from './connector-bridge.mjs';
 import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
+import { startCloudConnector, stopCloudConnector } from './cloud-connector.mjs';
 
 const db = createPersistence();
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -224,4 +225,9 @@ async function handle(request, response) {
 }
 const server=createServer((req,res)=>{ handle(req,res).catch(error=>{ console.error('Request failed:',error.message); if (!res.headersSent) { const status=error.status||500; json(res,status,{error:(status>=400&&status<500)||status===503?error.message:'Falha na consulta.'}); } }); });
 const port=Number(process.env.PORT||3100);
-server.listen(port,()=>console.log(`Central PostgreSQL na porta ${port}`));
+server.listen(port,()=>{
+  console.log(`Central PostgreSQL na porta ${port}`);
+  try { startCloudConnector(); } catch (error) { console.error(`[baileys] ${error.message}`); }
+});
+process.once('SIGTERM', () => { stopCloudConnector(); server.close(() => process.exit(0)); });
+process.once('SIGINT', () => { stopCloudConnector(); server.close(() => process.exit(0)); });

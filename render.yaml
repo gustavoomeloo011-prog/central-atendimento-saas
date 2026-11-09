@@ -3,7 +3,7 @@ services:
     name: central-atendimento-demo
     runtime: node
     plan: free
-    buildCommand: corepack enable && pnpm install --frozen-lockfile
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --dir apps/connector install --no-frozen-lockfile
     startCommand: pnpm dev:pg
     healthCheckPath: /
     envVars:
