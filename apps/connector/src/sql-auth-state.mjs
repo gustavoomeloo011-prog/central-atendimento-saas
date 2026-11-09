@@ -7,8 +7,11 @@ const keyText = process.env.BAILEYS_SESSION_ENCRYPTION_KEY || '';
 if (!/^[a-f0-9]{64}$/i.test(keyText)) throw new Error('BAILEYS_SESSION_ENCRYPTION_KEY deve conter 32 bytes em hexadecimal.');
 const key = Buffer.from(keyText, 'hex');
 const companyId = String(process.env.WHATSAPP_COMPANY_ID || '');
-const connectorName = String(process.env.WHATSAPP_CONNECTOR_NAME || 'baileys-cloud');
+const connectorNameBase = String(process.env.WHATSAPP_CONNECTOR_NAME || 'baileys-cloud');
 const userId = String(process.env.WHATSAPP_USER_ID || '');
+// Scope every lease and row to the authenticated user. This also keeps the
+// legacy unique(company_id, connector_name) constraint from aliasing users.
+const connectorName = userId ? `${connectorNameBase}:${userId}` : connectorNameBase;
 const sessionName = String(process.env.WHATSAPP_SESSION_ID || connectorName);
 const owner = `${process.pid}-${randomBytes(8).toString('hex')}`;
 
