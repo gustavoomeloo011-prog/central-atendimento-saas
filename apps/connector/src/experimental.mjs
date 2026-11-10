@@ -93,13 +93,16 @@ async function connect() {
       if (!sender || message.key?.fromMe || jid?.endsWith('@g.us') || jid === 'status@broadcast') continue;
       const body = message.message?.conversation || message.message?.extendedTextMessage?.text || message.message?.imageMessage?.caption || '';
       if (!body || !connectorToken) continue;
-      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, jid, name: message.pushName || sender, body, message_id: message.key?.id }) }).then(response => response.json()).then(async result => {
-        console.log(JSON.stringify({ type: 'authorized_message', sender, messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
+      fetch(centralApiUrl + '/api/internal/whatsapp/inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, phone: sender, jid, name: message.pushName || sender, body, message_id: message.key?.id }) }).then(async response => {
+        if (!response.ok) throw new Error(`Backend recusou recebimento (HTTP ${response.status})`);
+        return response.json();
+      }).then(async result => {
+        console.log(JSON.stringify({ type: 'authorized_message', messageId: message.key?.id, conversationId: result.conversation_id, queued: result.queued }));
         if (state.autoReplyEnabled && result.reply) {
           const sent = await socket.sendMessage(jid, { text: result.reply });
           await fetch(centralApiUrl + '/api/internal/whatsapp/outbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-connector-token': connectorToken }, body: JSON.stringify({ company_id: companyId, conversation_id: result.conversation_id, body: result.reply, message_id: sent?.key?.id }) });
         }
-      }).catch(error => console.error(JSON.stringify({ type: 'bridge_error', sender, error: error.message })));
+      }).catch(error => console.error(JSON.stringify({ type: 'bridge_error', messageId: message.key?.id, error: error.message })));
     }
   });
   current.ev.on('messages.update', updates => {

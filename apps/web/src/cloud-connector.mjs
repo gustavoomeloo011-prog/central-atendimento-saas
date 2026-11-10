@@ -15,7 +15,7 @@ export function startCloudConnector() {
   console.log(JSON.stringify({ type: 'baileys_cloud_start', sqlState: process.env.BAILEYS_SQL_STATE === 'true', encryptionKeyConfigured: Boolean(process.env.BAILEYS_SESSION_ENCRYPTION_KEY), connectorTokenConfigured: Boolean(process.env.WHATSAPP_CONNECTOR_TOKEN), companyConfigured: Boolean(process.env.WHATSAPP_COMPANY_ID), userConfigured: Boolean(process.env.WHATSAPP_USER_ID) }));
   child = spawn(process.execPath, [connector], {
     cwd: root,
-    env: { ...process.env, BAILEYS_SQL_STATE: 'true', WHATSAPP_CONNECTOR_PORT: process.env.WHATSAPP_CONNECTOR_PORT || '3200' },
+    env: { ...process.env, BAILEYS_SQL_STATE: 'true', WHATSAPP_CONNECTOR_PORT: process.env.WHATSAPP_CONNECTOR_PORT || '3200', CENTRAL_API_URL: `http://127.0.0.1:${Number(process.env.PORT || 3100)}` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', chunk => process.stdout.write(`[baileys] ${chunk}`));
