@@ -181,7 +181,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/send') {
     if (request.headers['x-connector-token'] !== connectorToken) return json(response, 401, { error: 'Conector não autorizado.' });
     const input = await parse(request); const phone = String(input.phone || '').replace(/\D/g, ''); const text = String(input.text || '').trim();
-    if (state.status !== 'CONNECTED' || !socket || socket.ws?.readyState !== 1) return json(response, 409, { error: 'WhatsApp desconectado.' });
+    if (state.status !== 'CONNECTED' || !socket) return json(response, 409, { error: 'WhatsApp desconectado.' });
     if ((!phone && !validRecipientJid(input.jid)) || (!text && !input.attachment?.data)) return json(response, 400, { error: 'Destinatário e conteúdo são obrigatórios.' });
     const jid = recipientJid(input);
     if (!jid) return json(response, 400, { error: 'Identificador WhatsApp inválido.' });
