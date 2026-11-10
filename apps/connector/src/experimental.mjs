@@ -74,7 +74,7 @@ async function connect() {
     }
     if (update.connection === 'close') {
       state.qr = null; pairing.clear();
-      await auth.saveCreds();
+      await auth.flush?.();
       const code = update.lastDisconnect?.error?.output?.statusCode ?? update.lastDisconnect?.error?.statusCode;
       const restartRequired = code === DisconnectReason.restartRequired || Number(code) === 515;
       state.status = manualDisconnect ? 'DISCONNECTED' : code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';

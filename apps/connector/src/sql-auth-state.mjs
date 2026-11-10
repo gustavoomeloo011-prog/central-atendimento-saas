@@ -61,13 +61,16 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   }
   const loaded = await read();
   const state = { creds: loaded.creds || initAuthCreds(), keys: loaded.keys || {} };
-  const save = () => write(state);
+  let writeChain = Promise.resolve();
+  const save = () => { writeChain = writeChain.then(() => write(state)); return writeChain; };
   const renewTimer = setInterval(() => query('select public.renew_connector_lease($1,$2,$3,60)', [companyId, connectorName, owner]).catch(()=>{}), 30_000);
   renewTimer.unref?.();
-  async function close() { clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
+  async function flush() { await writeChain; }
+  async function close() { await flush(); clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
   return {
     state,
-    saveCreds: async next => { state.creds = next; await save(); },
+    saveCreds: async next => { if (next && typeof next === 'object') state.creds = { ...state.creds, ...next }; await save(); },
+    flush,
     keys: {
       get: async (type, ids) => Object.fromEntries(ids.map(id => [id, state.keys[`${type}-${id}`]]).filter(([, value]) => value !== undefined)),
       set: async data => { for (const [type, values] of Object.entries(data)) for (const [id, value] of Object.entries(values)) { const key = `${type}-${id}`; if (value === null) delete state.keys[key]; else state.keys[key] = value; } await save(); },
