@@ -22,6 +22,7 @@ let pairingReadyWaiters = [];
 let authRegistered = false;
 let reconnectTimer = null;
 let authStateHandle = null;
+let pairingResetRequested = false;
 const pairing = createPairingController();
 let remoteResults = [];
 const startupCorrelation = randomUUID();
@@ -43,6 +44,15 @@ async function connect() {
   if (process.env.BAILEYS_SQL_STATE === 'true') {
     auth = await createSqlAuthState();
     authStateHandle = auth;
+    if (pairingResetRequested) {
+      await auth.deleteSession();
+      await auth.close();
+      authStateHandle = null;
+      auth = await createSqlAuthState();
+      authStateHandle = auth;
+      pairingResetRequested = false;
+      diag('stale_session_cleared_for_pairing');
+    }
     diag('sql_state_loaded', { registered: Boolean(auth.state.creds.registered), sqlState: true });
     await auth.acquireLease();
     diag('lease_acquired');
@@ -149,7 +159,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/whatsapp/status') return json(response, 200, publicState());
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/connect') {
     await ensureConnected().catch(error => { retryConnection(error); throw error; });
-    if (state.status !== 'CONNECTED') await waitForPairingReady();
+    if (state.status !== 'CONNECTED' && !authRegistered) await waitForPairingReady();
     return json(response, 200, publicState());
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/pairing-code') {
@@ -221,7 +231,7 @@ const server = createServer(async (request, response) => {
     if (authStateHandle) {
       await authStateHandle.deleteSession?.();
       await authStateHandle.close?.();
-    }
+    } else pairingResetRequested = true;
     authStateHandle = null;
     await rm(sessionDirectory, { recursive: true, force: true });
     authRegistered = false; state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false; state.lastError = null;

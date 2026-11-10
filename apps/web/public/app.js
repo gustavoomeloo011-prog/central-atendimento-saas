@@ -277,14 +277,14 @@ async function whatsapp() {
     document.querySelector('#back').onclick = settings;
     document.querySelector('#showQr').onclick = () => { whatsappMode = 'qr'; whatsapp(); };
     document.querySelector('#showPair').onclick = () => { whatsappMode = 'pair'; whatsapp(); };
-    if (whatsappMode === 'qr') document.querySelector('#connect').onclick = async () => { try { await api('/api/whatsapp/connect', { method: 'POST' }); whatsapp(); } catch (error) { alert(error.message); } };
+    if (whatsappMode === 'qr') document.querySelector('#connect').onclick = async () => { document.querySelector('#connect').disabled = true; try { await api('/api/whatsapp/connect', { method: 'POST' }); whatsapp(); } catch (error) { alert(error.message); whatsapp(); } };
     if (whatsappMode === 'pair') {
       document.querySelector('#pairForm').onsubmit = async event => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { await api('/api/whatsapp/pairing-code', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); } catch (error) { alert(error.message); button.disabled = false; whatsapp(); } };
       if (code) document.querySelector('#copyPair').onclick = () => navigator.clipboard.writeText(code).then(() => alert('Código copiado.')).catch(() => alert('Não foi possível copiar. Selecione o código na tela.'));
     }
     document.querySelector('#disconnect').onclick = async () => { if (confirm('Desconectar este WhatsApp?')) { await api('/api/whatsapp/disconnect', { method: 'POST' }); whatsapp(); } };
     document.querySelector('#toggleRobot').onclick=async()=>{await api('/api/whatsapp/auto-reply',{method:'POST',body:JSON.stringify({enabled:!status.autoReplyEnabled})});whatsapp();};
-    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Encerrar e apagar a sessão local do WhatsApp?')) { await api('/api/whatsapp/logout-and-delete-session', { method: 'POST' }); whatsapp(); } };
+    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Encerrar a conexão e apagar a sessão salva para permitir um novo pareamento?')) { try { await api('/api/whatsapp/logout-and-delete-session', { method: 'POST' }); const pending = await api('/api/whatsapp/connect', { method: 'POST' }); draw(pending); } catch (error) { alert(error.message); whatsapp(); } } };
     document.querySelector('#stop').onclick = async () => { await api('/api/whatsapp/emergency-stop', { method: 'POST' }); whatsapp(); };
     const numberInput = document.querySelector('#allow [name=number]');
     numberInput.oninput = () => { numberInput.value = formatPhone(numberInput.value); };
