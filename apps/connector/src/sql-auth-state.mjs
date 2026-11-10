@@ -80,6 +80,10 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   renewTimer.unref?.();
   async function flush() { await writeChain; }
   async function close() { await flush(); clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
+  async function deleteSession() {
+    await flush();
+    await query('delete from public.connector_sessions where company_id=$1 and user_id=$2 and session_id=$3', [companyId, userId, sessionName]);
+  }
   return {
     state,
     saveCreds: async next => { if (next && typeof next === 'object') Object.assign(state.creds, next); await save(); },
@@ -87,6 +91,7 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
     flush,
     keys: state.keys,
     acquireLease,
+    deleteSession,
     close,
   };
 }

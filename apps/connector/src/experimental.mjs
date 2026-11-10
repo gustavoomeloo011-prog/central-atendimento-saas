@@ -21,6 +21,7 @@ let manualDisconnect = false;
 let pairingReadyWaiters = [];
 let authRegistered = false;
 let reconnectTimer = null;
+let authStateHandle = null;
 const pairing = createPairingController();
 let remoteResults = [];
 const startupCorrelation = randomUUID();
@@ -41,6 +42,7 @@ async function connect() {
   let auth;
   if (process.env.BAILEYS_SQL_STATE === 'true') {
     auth = await createSqlAuthState();
+    authStateHandle = auth;
     diag('sql_state_loaded', { registered: Boolean(auth.state.creds.registered), sqlState: true });
     await auth.acquireLease();
     diag('lease_acquired');
@@ -83,6 +85,7 @@ async function connect() {
       state.lastError = restartRequired ? 'WhatsApp solicitou reinício da conexão; credenciais salvas, reconectando.' : String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
       await auth.close?.();
+      if (authStateHandle === auth) authStateHandle = null;
       if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, restartRequired ? 1000 : 3000);
     }
   });
@@ -215,6 +218,9 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/logout-and-delete-session') {
     manualDisconnect = true; pairing.clear();
     if (socket) { socket.logout(); socket = null; }
+    await authStateHandle?.deleteSession?.();
+    await authStateHandle?.close?.();
+    authStateHandle = null;
     await rm(sessionDirectory, { recursive: true, force: true });
     state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false;
     return json(response, 200, publicState());
