@@ -1,3 +1,4 @@
+import { renderSgp } from './sgp-panel.js';
 import { showFlowEditor } from './flow-editor.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
@@ -10,6 +11,19 @@ let mobilePane = 'list';
 let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
+const sgpData = new Map();
+async function loadSgp(id) {
+  const previous=sgpData.get(id);
+  if(previous && Date.now()-previous.at<60000)return;
+  sgpData.set(id,{at:Date.now(),value:null});
+  let value;
+  try { value=await api('/api/conversations/'+encodeURIComponent(id)+'/sgp'); }
+  catch { value={status:'unavailable',message:'Não foi possível consultar os dados do SGP.'}; }
+  sgpData.set(id,{at:Date.now(),value});
+  const panel=document.querySelector('#sgpDetails');
+  if(activeId===id&&panel)panel.innerHTML=renderSgp(value);
+}
+
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -41,6 +55,7 @@ function login() {
 
 async function boot() {
   try {
+    sgpData.clear();
     state = await api('/api/bootstrap');
     activeId = state.conversations[0]?.id || null;
     state.detail = null;
@@ -57,6 +72,7 @@ async function boot() {
 async function refreshLive() {
   if (!token || document.hidden || document.activeElement?.matches('textarea,input,select')) return;
   try {
+    if(activeId&&document.querySelector('#sgpDetails'))void loadSgp(activeId);
     const next = await api('/api/bootstrap');
     const detail = activeId ? await api('/api/conversations/' + activeId) : null;
     const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
@@ -76,6 +92,7 @@ function messageHtml(message) {
 async function openConversation(id) {
   activeId = id;
   state.detail = await api('/api/conversations/' + id);
+  void loadSgp(id);
   mobilePane = 'chat';
   render();
 }
@@ -92,7 +109,7 @@ function render() {
   const inbox = '<section class="list"><div class="toolbar"><span class="tag">FILA ' + list.filter(item => item.status === 'waiting').length + '</span><button class="btn subtle" id="refresh">Atualizar</button></div>' + list.map(item => '<article class="conversation ' + (item.id === activeId ? 'active' : '') + '" data-id="' + item.id + '"><b>' + esc(item.contact_name) + '</b> <span class="tag ' + item.status + '">' + esc(item.status) + '</span><div class="muted">' + esc(item.last_message || item.subject) + '</div><small>' + esc(item.department_name) + ' · ' + esc(item.contact_phone) + '</small></article>').join('') + '</section>';
   const shortcuts = (state.quickReplies || []).map(reply => '<button class="quick" data-quick="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('');
   const quickDock = '<div class="quickDock"><button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette">' + shortcuts + '</div></div>';
-  const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox"><span class="tag">SGP</span><h3>Dados do cliente</h3><p class="muted">Quando o cadastro não for localizado no SGP, os campos permanecem nulos e este atendimento pode ser tratado como uma nova contratação.</p><dl class="clientData"><dt>Contrato</dt><dd>Não informado</dd><dt>Endereço</dt><dd>Não informado</dd><dt>Plano</dt><dd>Não informado</dd></dl><a class="btn" href="https://cadastro.sgfibra.com.br" target="_blank" rel="noopener">Abrir cadastro SG Fibra</a></div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
+  const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox" id="sgpDetails" aria-live="polite">' + renderSgp(sgpData.get(activeId)?.value) + '</div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
   const replyPreview = replyTo ? '<div class="replyPreview"><span>Respondendo: ' + esc(replyTo.body) + '</span><button type="button" id="cancelReply">×</button></div>' : '';
   const chat = conversation ? '<section class="chat"><div class="mobileChatNav"><button class="btn subtle" id="backToList">← Conversas</button><button class="btn subtle" id="showClient">Dados do cliente</button></div><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span><button class="linkButton" id="renameContact">Editar nome</button></div><div class="chatActions"><button class="btn subtle" id="internalNote">🔒 Nota interna</button><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="messages">' + messages.map(messageHtml).join('') + '</div>' + replyPreview + '<form class="composer" id="send"><input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf" hidden><button class="attachButton" id="attachButton" type="button" title="Anexar foto, vídeo ou PDF">＋</button><textarea name="body" placeholder="Escreva uma mensagem"></textarea><span class="attachmentName" id="attachmentName"></span><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
   app.innerHTML = shell(inbox + chat + client);
