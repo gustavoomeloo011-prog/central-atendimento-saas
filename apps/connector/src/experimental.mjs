@@ -65,6 +65,7 @@ async function connect() {
     }
     if (update.connection === 'open') {
       await auth.markRegistered?.();
+      pairingReadyWaiters.splice(0).forEach(resolve => resolve());
       pairing.clear(); authRegistered = true;
       state.status = 'CONNECTED';
       state.qr = null;
@@ -122,7 +123,7 @@ async function ensureConnected() {
   await starting;
 }
 async function waitForPairingReady() {
-  if (state.qr) return;
+  if (state.qr || state.status === 'CONNECTED') return;
   await new Promise((resolve,reject) => {
     const ready = () => { clearTimeout(timer); resolve(); };
     const timer = setTimeout(() => { pairingReadyWaiters = pairingReadyWaiters.filter(waiter => waiter !== ready); reject(new Error('Conector não ficou pronto para pareamento. Tente novamente.')); }, 15_000);
@@ -130,12 +131,21 @@ async function waitForPairingReady() {
   });
 }
 
+function retryConnection(error) {
+  state.status = 'RECONNECTING'; state.lastError = error.message;
+  if (!reconnectTimer) reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (!socket && !manualDisconnect) ensureConnected().catch(retryConnection);
+  }, 65_000);
+}
+
 const server = createServer(async (request, response) => {
+  try {
   const url = new URL(request.url, 'http://localhost');
   if (!connectorToken || request.headers['x-connector-token'] !== connectorToken) return json(response, 401, { error: 'Acesso ao conector não autorizado.' });
   if (request.method === 'GET' && url.pathname === '/api/whatsapp/status') return json(response, 200, publicState());
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/connect') {
-    await ensureConnected();
+    await ensureConnected().catch(error => { retryConnection(error); throw error; });
     if (state.status !== 'CONNECTED') await waitForPairingReady();
     return json(response, 200, publicState());
   }
@@ -210,10 +220,13 @@ const server = createServer(async (request, response) => {
     return json(response, 200, publicState());
   }
   json(response, 404, { error: 'Rota não encontrada.' });
+  } catch (error) {
+    if (!response.headersSent) json(response, 503, { error: error.message || 'Conector indisponível.' });
+  }
 });
 server.listen(port, '127.0.0.1', () => {
   console.log('WhatsApp experimental em http://127.0.0.1:' + port);
-  ensureConnected().catch(error => { state.status='ERROR'; state.lastError=error.message; });
+  ensureConnected().catch(retryConnection);
 });
 
 async function syncRemoteBridge() {
