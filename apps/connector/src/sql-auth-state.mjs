@@ -60,9 +60,22 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
     if (!rows[0]?.acquired) throw new Error('Outra instância já possui a sessão Baileys.');
   }
   const loaded = await read();
-  const state = { creds: loaded.creds || initAuthCreds(), keys: loaded.keys || {} };
+  const keyData = loaded.keys || {};
+  const state = {
+    creds: loaded.creds || initAuthCreds(),
+    keys: {
+      get: async (type, ids) => Object.fromEntries(ids.map(id => [id, keyData[`${type}-${id}`]]).filter(([, value]) => value !== undefined)),
+      set: async data => {
+        for (const [type, values] of Object.entries(data)) for (const [id, value] of Object.entries(values)) {
+          const name = `${type}-${id}`;
+          if (value === null) delete keyData[name]; else keyData[name] = value;
+        }
+        await save();
+      },
+    },
+  };
   let writeChain = Promise.resolve();
-  const save = () => { writeChain = writeChain.then(() => write(state)); return writeChain; };
+  const save = () => { writeChain = writeChain.then(() => write({ creds: state.creds, keys: keyData })); return writeChain; };
   const renewTimer = setInterval(() => query('select public.renew_connector_lease($1,$2,$3,60)', [companyId, connectorName, owner]).catch(()=>{}), 30_000);
   renewTimer.unref?.();
   async function flush() { await writeChain; }
@@ -71,10 +84,7 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
     state,
     saveCreds: async next => { if (next && typeof next === 'object') state.creds = { ...state.creds, ...next }; await save(); },
     flush,
-    keys: {
-      get: async (type, ids) => Object.fromEntries(ids.map(id => [id, state.keys[`${type}-${id}`]]).filter(([, value]) => value !== undefined)),
-      set: async data => { for (const [type, values] of Object.entries(data)) for (const [id, value] of Object.entries(values)) { const key = `${type}-${id}`; if (value === null) delete state.keys[key]; else state.keys[key] = value; } await save(); },
-    },
+    keys: state.keys,
     acquireLease,
     close,
   };
