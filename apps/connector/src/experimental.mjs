@@ -91,12 +91,22 @@ async function connect() {
       await auth.flush?.();
       const code = update.lastDisconnect?.error?.output?.statusCode ?? update.lastDisconnect?.error?.statusCode;
       const restartRequired = code === DisconnectReason.restartRequired || Number(code) === 515;
-      state.status = manualDisconnect ? 'DISCONNECTED' : code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
-      state.lastError = restartRequired ? 'WhatsApp solicitou reinício da conexão; credenciais salvas, reconectando.' : String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
+      const loggedOut = code === DisconnectReason.loggedOut;
+      if (restartRequired) {
+        await auth.flush?.();
+        diag('restart_required_auth_flushed', { registered: Boolean(auth.state.creds.registered) });
+      }
+      state.status = manualDisconnect ? 'DISCONNECTED' : loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
+      state.lastError = restartRequired ? 'WhatsApp solicitou reinício. Credenciais persistidas; reconectando.' : loggedOut ? 'WhatsApp rejeitou a sessão salva (401 / loggedOut). Apague a sessão para iniciar novo pareamento.' : String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
+      if (loggedOut) {
+        authRegistered = false;
+        await auth.deleteSession?.();
+        state.status = 'LOGGED_OUT';
+      }
       await auth.close?.();
       if (authStateHandle === auth) authStateHandle = null;
-      if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, restartRequired ? 1000 : 3000);
+      if (!manualDisconnect && !loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, restartRequired ? 1000 : 3000);
     }
   });
   current.ev.on('messages.upsert', ({ messages, type }) => {
@@ -233,6 +243,7 @@ const server = createServer(async (request, response) => {
       await authStateHandle.close?.();
     } else pairingResetRequested = true;
     authStateHandle = null;
+    pairingResetRequested = process.env.BAILEYS_SQL_STATE === 'true';
     await rm(sessionDirectory, { recursive: true, force: true });
     authRegistered = false; state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false; state.lastError = null;
     return json(response, 200, publicState());

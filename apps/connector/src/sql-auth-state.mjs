@@ -82,7 +82,15 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   async function close() { await flush(); clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
   async function deleteSession() {
     await flush();
-    await query('delete from public.connector_sessions where company_id=$1 and user_id=$2 and session_id=$3', [companyId, userId, sessionName]);
+    await query('begin');
+    try {
+      await query('delete from public.connector_sessions where company_id=$1 and user_id=$2 and session_id=$3', [companyId, userId, sessionName]);
+      await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]);
+      await query('commit');
+    } catch (error) {
+      await query('rollback').catch(()=>{});
+      throw error;
+    }
   }
   return {
     state,
