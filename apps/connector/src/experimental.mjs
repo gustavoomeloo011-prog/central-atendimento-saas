@@ -76,11 +76,12 @@ async function connect() {
       state.qr = null; pairing.clear();
       await auth.saveCreds();
       const code = update.lastDisconnect?.error?.output?.statusCode ?? update.lastDisconnect?.error?.statusCode;
+      const restartRequired = code === DisconnectReason.restartRequired || Number(code) === 515;
       state.status = manualDisconnect ? 'DISCONNECTED' : code === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'RECONNECTING';
-      state.lastError = String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
+      state.lastError = restartRequired ? 'WhatsApp solicitou reinício da conexão; credenciais salvas, reconectando.' : String(update.lastDisconnect?.error?.message || 'Conexão encerrada') + ' (code ' + String(code || 'unknown') + ')';
       socket = null;
       await auth.close?.();
-      if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, 3000);
+      if (!manualDisconnect && code !== DisconnectReason.loggedOut) reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!socket && state.status === 'RECONNECTING') ensureConnected().catch(error => { state.status = 'ERROR'; state.lastError = error.message; }); }, restartRequired ? 1000 : 3000);
     }
   });
   current.ev.on('messages.upsert', ({ messages, type }) => {
