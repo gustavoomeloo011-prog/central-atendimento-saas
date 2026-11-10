@@ -82,7 +82,8 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   async function close() { await flush(); clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
   return {
     state,
-    saveCreds: async next => { if (next && typeof next === 'object') state.creds = { ...state.creds, ...next }; await save(); },
+    saveCreds: async next => { if (next && typeof next === 'object') Object.assign(state.creds, next); await save(); },
+    markRegistered: async () => { state.creds.registered = true; await save(); },
     flush,
     keys: state.keys,
     acquireLease,

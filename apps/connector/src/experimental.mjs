@@ -64,6 +64,7 @@ async function connect() {
       pairingReadyWaiters.splice(0).forEach(resolve => resolve());
     }
     if (update.connection === 'open') {
+      await auth.markRegistered?.();
       pairing.clear(); authRegistered = true;
       state.status = 'CONNECTED';
       state.qr = null;
