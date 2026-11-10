@@ -29,9 +29,17 @@ function open(data, nonce, tag) {
 
 export async function createSqlAuthState(connectionString = process.env.DATABASE_URL) {
   if (!connectionString) throw new Error('DATABASE_URL é obrigatória para o estado Baileys.');
-  const ca = String(process.env.PGSSL_CA || process.env.PGSSL_ROOT_CERT || '').trim();
+  const caInline = String(process.env.PGSSL_CA || '').trim();
+  const caPath = String(process.env.PGSSL_ROOT_CERT || '').trim();
+  const ca = caInline ? caInline.replace(/\\n/g, '\n') : (caPath ? (await import('node:fs/promises')).readFile(caPath, 'utf8') : '');
   const ssl = ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: true };
-  const pool = new Pool({ connectionString, ssl });
+  let poolConnectionString = connectionString;
+  try {
+    const parsed = new URL(connectionString);
+    for (const name of ['sslmode','sslrootcert','sslcert','sslkey']) parsed.searchParams.delete(name);
+    poolConnectionString = parsed.toString();
+  } catch {}
+  const pool = new Pool({ connectionString: poolConnectionString, ssl });
   if (!userId) throw new Error('WHATSAPP_USER_ID é obrigatório para uma sessão Baileys individual.');
   const sessionId = `${companyId}:${userId}:${sessionName}`;
   const query = (sql, values=[]) => pool.query(sql, values);
