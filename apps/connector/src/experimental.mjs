@@ -35,7 +35,7 @@ const numberFromJid = jid => {
 };
 const validRecipientJid = value => /^(?:\d+@(s\.whatsapp\.net|lid)|[\d-]+:[\d-]+@(s\.whatsapp\.net|lid))$/i.test(String(value || '')) ? String(value) : null;
 const recipientJid = input => validRecipientJid(input.jid) || (/^55\d{10,11}$/.test(String(input.phone || '').replace(/\D/g, '')) ? String(input.phone).replace(/\D/g, '') + '@s.whatsapp.net' : null);
-const publicState = () => { const p=pairing.snapshot(); return { status: p.expired && state.status === 'PAIRING_CODE' ? 'PAIRING_EXPIRED' : state.status, qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size, pairing: p }; };
+const publicState = () => { const p=pairing.snapshot(); return { status: p.expired && state.status === 'PAIRING_CODE' ? 'PAIRING_EXPIRED' : state.status, backendOnline: true, connectorOnline: true, whatsappConnected: state.status === 'CONNECTED', sessionRegistered: authRegistered, qrAvailable: Boolean(state.qr), qr: state.qr, phone: state.phone, profileName: state.profileName, lastError: state.lastError, autoReplyEnabled: state.autoReplyEnabled, connectedAt: state.connectedAt, syncStatus: state.syncStatus, allowedCount: allowedNumbers.size, pairing: p }; };
 
 async function connect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -217,12 +217,14 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/logout-and-delete-session') {
     manualDisconnect = true; pairing.clear();
-    if (socket) { socket.logout(); socket = null; }
-    await authStateHandle?.deleteSession?.();
-    await authStateHandle?.close?.();
+    if (socket) { try { socket.end(undefined); } catch {} socket = null; }
+    if (authStateHandle) {
+      await authStateHandle.deleteSession?.();
+      await authStateHandle.close?.();
+    }
     authStateHandle = null;
     await rm(sessionDirectory, { recursive: true, force: true });
-    state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false;
+    authRegistered = false; state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false; state.lastError = null;
     return json(response, 200, publicState());
   }
   json(response, 404, { error: 'Rota não encontrada.' });
