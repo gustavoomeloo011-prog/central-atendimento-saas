@@ -51,7 +51,7 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   async function write(value) {
     const sealed = seal(value);
     await query(`insert into public.connector_sessions(id,company_id,connector_name,user_id,session_id,status,auth_state,auth_state_nonce,auth_state_tag,last_seen_at)
-      values($1,$2,$3,$4,$5,'CONNECTING',$6,$7,$8,$9,now())
+      values($1,$2,$3,$4,$5,'CONNECTING',$6,$7,$8,now())
       on conflict(company_id,connector_name) do update set user_id=excluded.user_id,session_id=excluded.session_id,auth_state=excluded.auth_state,auth_state_nonce=excluded.auth_state_nonce,auth_state_tag=excluded.auth_state_tag,last_seen_at=now()`,
       [sessionId, companyId, connectorName, userId, sessionName, sealed.data, sealed.nonce, sealed.tag]);
   }
