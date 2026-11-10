@@ -124,6 +124,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/whatsapp/status') return json(response, 200, publicState());
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/connect') {
     await ensureConnected();
+    if (state.status !== 'CONNECTED') await waitForPairingReady();
     return json(response, 200, publicState());
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/pairing-code') {
