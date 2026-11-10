@@ -5,6 +5,7 @@ import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeys
 import QRCode from 'qrcode';
 import { createPairingController } from './pairing.mjs';
 import { createSqlAuthState } from './sql-auth-state.mjs';
+import { randomUUID } from 'node:crypto';
 
 const port = Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200);
 const sessionDirectory = process.env.WHATSAPP_SESSION_DIR || join(process.cwd(), 'apps', 'connector', 'sessions');
@@ -22,6 +23,8 @@ let authRegistered = false;
 let reconnectTimer = null;
 const pairing = createPairingController();
 let remoteResults = [];
+const startupCorrelation = randomUUID();
+const diag = (event, details = {}) => console.log(JSON.stringify({ type: 'baileys_diag', correlationId: startupCorrelation, event, ...details }));
 
 const json = (response, status, value) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': 'http://localhost:3100' }); response.end(JSON.stringify(value)); };
 const parse = request => new Promise(resolve => { let raw = ''; request.on('data', chunk => raw += chunk); request.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } }); });
@@ -38,7 +41,9 @@ async function connect() {
   let auth;
   if (process.env.BAILEYS_SQL_STATE === 'true') {
     auth = await createSqlAuthState();
+    diag('sql_state_loaded', { registered: Boolean(auth.state.creds.registered), sqlState: true });
     await auth.acquireLease();
+    diag('lease_acquired');
   } else {
     await mkdir(sessionDirectory, { recursive: true });
     auth = await useMultiFileAuthState(sessionDirectory);
@@ -46,11 +51,13 @@ async function connect() {
   authRegistered = Boolean(auth.state.creds.registered);
   state.status = auth.state.creds.registered ? 'CONNECTING' : 'QR_PENDING';
   state.lastError = null;
+  diag('socket_starting', { registered: authRegistered });
   const current = makeWASocket({ auth: auth.state, printQRInTerminal: false, browser: ['Central Experimental', 'Chrome', '1.0.0'] });
   socket = current;
   current.ev.on('creds.update', auth.saveCreds);
   current.ev.on('connection.update', async update => {
     if (socket !== current) return;
+    if (update.connection || update.qr) diag('connection_update', { connection: update.connection || null, qr: Boolean(update.qr), disconnectCode: update.lastDisconnect?.error?.output?.statusCode ?? update.lastDisconnect?.error?.statusCode ?? null });
     if (update.qr && !pairing.snapshot().code) {
       state.status = 'QR_PENDING';
       state.qr = await QRCode.toDataURL(update.qr, { errorCorrectionLevel: 'M', margin: 2, width: 300 });
