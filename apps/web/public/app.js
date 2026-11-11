@@ -62,6 +62,7 @@ async function boot() {
   try {
     sgpData.clear();
     state = await api('/api/bootstrap');
+    if (!state.robotEnabled && inboxMode === 'general') inboxMode = 'human';
     const visible = item => inQueue(item,inboxMode,state.profile.id);
     activeId = (state.conversations || []).find(visible)?.id || null;
     state.detail = null;
@@ -134,7 +135,7 @@ function render() {
       { id: 'human', symbol: '🕒', label: 'Aguardando atendente' },
       { id: 'mine', symbol: '👤', label: 'Meus atendimentos' },
       { id: 'closed', symbol: 'Encerrados', label: 'Encerrados' }
-    ];
+    ].filter(item => state.robotEnabled || item.id !== 'general');
     const mode = document.createElement('div'); mode.className = 'inboxModes';
     mode.innerHTML = modes.map(item => '<button class="btn queueMode ' + (inboxMode === item.id ? '' : 'subtle') + '" type="button" data-inbox-mode="' + item.id + '" aria-label="' + item.label + '" title="' + item.label + '">' + item.symbol + '</button>').join('') + '<button class="iconButton" id="newConversation" type="button" aria-label="Nova conversa" title="Nova conversa">＋</button>';
     mode.querySelectorAll('[data-inbox-mode]').forEach(button => {

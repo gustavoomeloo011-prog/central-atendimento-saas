@@ -205,7 +205,7 @@ async function handle(request, response) {
             if (!department) continue;
             const id = randomUUID();
             const protocol = (await tx.one('select public.next_protocol($1) protocol', [company])).protocol;
-            c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7,'meta') returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
+            c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport,human_started_at) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7,'meta',case when not exists(select 1 from public.automation_flows where company_id=$2 and status='published') then now() end) returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
           }
           await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
@@ -280,7 +280,7 @@ async function handle(request, response) {
       if (!c&&defaultTransport!=='baileys')return {conversation_id:null,reply:null,duplicate:false,ignored:true};
       if (!c) { const d=await tx.one('select id from public.departments where company_id=$1 order by id limit 1',[company]); if (!d) throw Object.assign(new Error('Empresa sem fila.'),{status:409});
         const id=randomUUID(), protocol=(await tx.one('select public.next_protocol($1) protocol',[company])).protocol;
-        c=await tx.one('insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,\'baileys\') returning *',[id,company,d.id,input.name||phone,phone,channelAddress||null,'WhatsApp','waiting','normal',d.id,protocol]); }
+        c=await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport,human_started_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'baileys',case when not exists(select 1 from public.automation_flows where company_id=$2 and status='published') then now() end) returning *",[id,company,d.id,input.name||phone,phone,channelAddress||null,'WhatsApp','waiting','normal',d.id,protocol]); }
       else if(channelAddress&&!c.channel_address){c=await tx.one('update public.conversations set channel_address=$1,contact_phone=case when length($2) between 10 and 15 then $2 else contact_phone end,updated_at=now() where company_id=$3 and id=$4 returning *',[channelAddress,phone,company,c.id]);}
       const providerId=inboundProviderId;
       if (providerId && await tx.one('select id from public.messages where provider_message_id=$1',[providerId])) return {conversation_id:c.id,protocol:c.protocol,reply:null,duplicate:true};
@@ -311,11 +311,11 @@ async function handle(request, response) {
   }
   if (url.pathname.startsWith('/api/whatsapp/') && url.pathname !== '/api/whatsapp/transport') return admin(session) ? proxyWhatsApp(request,response,company) : json(response,403,{error:'Somente supervisores podem gerenciar a conexão.'});
   if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
-    const [companyRow,conversations,departments,replies]=await Promise.all([
+    const [companyRow,conversations,departments,replies,robot]=await Promise.all([
       db.one('select * from public.companies where id=$1',[company]),
       db.query("select c.*,d.name department_name,p.name assignee_name,(select body from public.messages m where m.conversation_id=c.id order by created_at desc limit 1) last_message from public.conversations c join public.departments d on d.id=c.department_id left join public.profiles p on p.id=c.assigned_profile_id where c.company_id=$1 order by case c.status when 'waiting' then 0 else 1 end,c.updated_at desc",[company]),
-      db.query('select * from public.departments where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company])]);
-    return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies});
+      db.query('select * from public.departments where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),db.one("select exists(select 1 from public.automation_flows where company_id=$1 and status='published') enabled",[company])]);
+    return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies,robotEnabled:Boolean(robot?.enabled)});
   }
   if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company)]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,metaApiConfigured:metaApiConfigured()}); }
   if(request.method==='PATCH'&&url.pathname==='/api/whatsapp/transport'){
