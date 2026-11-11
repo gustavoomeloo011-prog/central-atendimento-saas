@@ -48,6 +48,58 @@ async function connectorSend(payload) {
   if (!response.ok) throw Object.assign(new Error(result.error||'Falha no envio ao WhatsApp.'),{status:response.status});
   return result;
 }
+const selectedTransport = async company => {
+  try{return (await db.one('select whatsapp_transport from public.company_settings where company_id=$1',[company]))?.whatsapp_transport || 'baileys';}
+  catch(error){if(error.code==='42703')return 'baileys';throw error;}
+};
+const metaAccessToken = () => process.env.META_ACCESS_TOKEN || process.env.META_PERMANENT_ACCESS_TOKEN || process.env.META_TOKEN || process.env.WHATSAPP_CLOUD_API_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_TOKEN || '';
+const metaPhoneNumberId = () => process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.WHATSAPP_NUMBER_ID || '';
+const metaApiVersion = () => String(process.env.META_GRAPH_API_VERSION || process.env.META_API_VERSION || '25.0').replace(/^v/i,'');
+const metaApiConfigured = () => Boolean(metaAccessToken() && metaPhoneNumberId() && /^\d+\.\d+$/.test(metaApiVersion()));
+async function metaSendText({phone,text,replyTo}) {
+  const token=metaAccessToken(),phoneNumberId=metaPhoneNumberId(),version=metaApiVersion();
+  if(!token||!phoneNumberId||!/^\d+\.\d+$/.test(version))throw Object.assign(new Error('Cloud API não configurada: confira o token, Phone Number ID e versão da Graph API no ambiente do Render.'),{status:503});
+  if(!/^55\d{10,11}$/.test(String(phone||'')))throw Object.assign(new Error('A Cloud API exige o telefone do contato no formato internacional E.164.'),{status:409});
+  const body={messaging_product:'whatsapp',recipient_type:'individual',to:String(phone),type:'text',text:{preview_url:false,body:String(text||'')}};
+  if(replyTo)body.context={message_id:String(replyTo)};
+  let response;
+  try{response=await fetch(`https://graph.facebook.com/v${version}/${phoneNumberId}/messages`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20_000)});}
+  catch(error){throw Object.assign(new Error('Resultado do envio Cloud API desconhecido; não repita automaticamente.'),{status:502,uncertain:true,cause:error});}
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)throw Object.assign(new Error(result.error?.error_user_msg||result.error?.message||'A Meta recusou o envio.'),{status:response.status,metaCode:result.error?.code||null});
+  const messageId=String(result.messages?.[0]?.id||'');
+  if(!messageId)throw Object.assign(new Error('A Meta não retornou um identificador de mensagem.'),{status:502,uncertain:true});
+  return {messageId,accepted:true};
+}
+async function sendOnSelectedTransport(company,payload){
+  const transport=await selectedTransport(company);
+  if(transport==='meta'){
+    if(payload.attachment?.data)throw Object.assign(new Error('Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'),{status:501});
+    return metaSendText({phone:payload.phone,text:payload.text,replyTo:payload.reply?.provider_message_id});
+  }
+  return connectorSend(payload);
+}
+async function deliverMetaOutbox(outboxId){
+  const item=await db.transaction(async tx=>{
+    const row=await tx.one("select * from public.whatsapp_outbox where id=$1 and status='pending' for update skip locked",[outboxId]);
+    if(!row)return null;
+    return tx.one("update public.whatsapp_outbox set status='leased',attempts=attempts+1,updated_at=now() where id=$1 returning *",[row.id]);
+  });
+  if(!item)return;
+  try{
+    const sent=await metaSendText({phone:item.to_phone,text:item.body});
+    await db.transaction(async tx=>{
+      await tx.query("update public.whatsapp_outbox set status='sent',provider_message_id=$1,last_error=null,updated_at=now() where id=$2",[sent.messageId,item.id]);
+      await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId,item.company_id,item.idempotency_key.replace(/^meta-message:/,'')]);
+    });
+  }catch(error){
+    const state=error.uncertain?'unknown':'failed';
+    await db.transaction(async tx=>{
+      await tx.query('update public.whatsapp_outbox set status=$1,last_error=$2,updated_at=now() where id=$3',[state,String(error.message||'Falha Cloud API').slice(0,500),item.id]);
+      await tx.query('update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4',[state,String(error.message||'Falha Cloud API').slice(0,500),item.company_id,item.idempotency_key.replace(/^meta-message:/,'')]);
+    });
+  }
+}
 async function storeAttachment(company,conversationId,messageId,attachment) {
   if (!attachment?.data) return null;
   const bytes=Buffer.from(String(attachment.data),'base64');
@@ -104,6 +156,22 @@ async function handle(request, response) {
     const expectedWaba = String(process.env.META_WABA_ID || '');
     const entries = Array.isArray(input.entry) ? input.entry : [];
     if (expectedWaba && entries.some(entry => String(entry.id || '') !== expectedWaba)) return json(response, 403, { error: 'WABA não autorizada.' });
+    const expectedPhoneId=metaPhoneNumberId();
+    if(expectedPhoneId&&entries.some(entry=>(entry.changes||[]).some(change=>change.value?.metadata?.phone_number_id&&String(change.value.metadata.phone_number_id)!==expectedPhoneId)))return json(response,403,{error:'Phone Number ID não autorizado.'});
+    const companyTransport=await selectedTransport(company),initialVariablesByProvider=new Map();
+    if(companyTransport==='meta'){
+      for(const entry of entries)for(const change of (entry.changes||[]))for(const message of (change.value?.messages||[])){
+        if(message.type!=='text')continue;
+        const providerId=String(message.id||''),phone=String(message.from||'').replace(/\D/g,'');
+        if(!providerId||!phone||await db.one('select event_id from public.connector_events where event_id=$1',[`message:${providerId}`]))continue;
+        const existingRun=await db.one("select c.id,c.assigned_profile_id,fr.status run_status from public.conversations c left join public.flow_runs fr on fr.company_id=c.company_id and fr.conversation_id=c.id where c.company_id=$1 and (c.contact_phone=$2 or c.channel_address=$3) and c.status<>'closed' order by c.updated_at desc limit 1",[company,phone,`${phone}@s.whatsapp.net`]);
+        const active=await db.one("select id from public.automation_flows where company_id=$1 and status='published' limit 1",[company]);
+        if(active&&!existingRun?.assigned_profile_id&&!existingRun?.run_status){
+          const sgpResult=await sgp.lookup(company,phone),services=sgpResult.status==='found'?sgpResult.customer?.contracts?.flatMap(contract=>contract.services||[])||[]:[],internet=services.find(service=>service.type==='internet')||null,invoices=sgpResult.status==='found'?sgpResult.customer?.invoices:null;
+          initialVariablesByProvider.set(providerId,{client_found:sgpResult.status==='found',client_name:sgpResult.status==='found'?String(sgpResult.customer?.name||'').slice(0,120):'',client_lookup_status:sgpResult.status,internet_online:internet?.online??null,fiber_rx_dbm:internet?.rxDbm??null,fiber_tx_dbm:internet?.txDbm??null,open_invoice_count:invoices?.count??null,overdue_invoice_count:invoices?.overdue??null});
+        }
+      }
+    }
     let processed = 0, duplicates = 0;
     await db.transaction(async tx => {
       for (const entry of entries) for (const change of (entry.changes || [])) {
@@ -133,10 +201,20 @@ async function handle(request, response) {
           }
           await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
+          if(companyTransport==='meta'&&message.type==='text'&&!c.assigned_profile_id&&c.status!=='closed'){
+            const graphReply=await executePublishedFlow(tx,company,c,text,initialVariablesByProvider.get(providerId)||{});
+            if(graphReply?.reply){
+              const messageId=randomUUID(),outboxId=randomUUID();
+              await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,graphReply.reply]);
+              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body) values($1,$2,$3,$4,$5,$6) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,graphReply.reply]);
+            }
+          }
           processed++;
         }
       }
     });
+    const pendingMetaReplies=await db.query("select id from public.whatsapp_outbox where company_id=$1 and status='pending' and idempotency_key like 'meta-message:%' and created_at>now()-interval '5 minutes' order by created_at limit 20",[company]);
+    for(const item of pendingMetaReplies)await deliverMetaOutbox(item.id);
     return json(response, 200, { ok: true, processed, duplicates });
   }
   if (request.method === 'POST' && url.pathname === '/api/internal/connector/sync') {
@@ -159,7 +237,8 @@ async function handle(request, response) {
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/inbound') {
     if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
     const input=await body(request), company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''), phone=String(input.phone||'').replace(/\D/g,''), text=String(input.body||'').trim(),channelAddress=String(input.jid||'');
-    if (!company || company !== process.env.WHATSAPP_COMPANY_ID || !phone || !text) return json(response,400,{error:'Empresa, telefone e mensagem são obrigatórios.'});
+  if (!company || company !== process.env.WHATSAPP_COMPANY_ID || !phone || !text) return json(response,400,{error:'Empresa, telefone e mensagem são obrigatórios.'});
+    if(await selectedTransport(company)==='meta')return json(response,202,{ok:true,ignored:true,reason:'A Cloud API está selecionada para esta empresa.'});
     const inboundProviderId=String(input.message_id||'')||null;
     if(inboundProviderId){const duplicate=await db.one('select conversation_id from public.messages where provider_message_id=$1',[inboundProviderId]);if(duplicate)return json(response,200,{ok:true,conversation_id:duplicate.conversation_id,reply:null,duplicate:true});}
     // Look up SGP only when this conversation is about to start a robot run.
@@ -224,7 +303,17 @@ async function handle(request, response) {
       db.query('select * from public.departments where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company])]);
     return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies});
   }
-  if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company])]); return json(response,200,{profiles,departments,settings,replies}); }
+  if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company)]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,metaApiConfigured:metaApiConfigured()}); }
+  if(request.method==='PATCH'&&url.pathname==='/api/whatsapp/transport'){
+    if(!admin(session))return json(response,403,{error:'Sem permissão.'});
+    const input=await body(request),transport=String(input.transport||'');
+    if(!['baileys','meta'].includes(transport))return json(response,400,{error:'Escolha Meta Cloud API ou Baileys.'});
+    if(transport==='meta'&&!metaApiConfigured())return json(response,409,{error:'Configure no Render o token, Phone Number ID e META_GRAPH_API_VERSION antes de ativar a Cloud API.'});
+    try{await db.query("insert into public.company_settings(company_id,whatsapp_transport) values($1,$2) on conflict(company_id) do update set whatsapp_transport=excluded.whatsapp_transport,updated_at=now()",[company,transport]);}
+    catch(error){if(error.code==='42703')return json(response,503,{error:'Aplique a migration 009_whatsapp_transport.sql no Supabase para liberar a escolha do canal.'});throw error;}
+    await audit(db,session,'whatsapp_transport_changed',company,'settings');
+    return json(response,200,{ok:true,transport,metaApiConfigured:metaApiConfigured()});
+  }
   if(request.method==='PATCH'&&url.pathname==='/api/profile'){const input=await body(request),display=String(input.display_name||'').trim();if(display.length<2||display.length>80)return json(response,400,{error:'Informe o nome que aparecerá nas mensagens (2 a 80 caracteres).'});await db.query('update public.profiles set display_name=$1,name=coalesce(nullif(name,\'\'),$1),phone=$2,last_seen_at=now() where company_id=$3 and id=$4',[display,String(input.phone||'').trim().slice(0,30)||null,company,session.profile.id]);return json(response,200,{ok:true});}
   if (request.method === 'POST' && url.pathname === '/api/agents') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request), name=String(input.name||'').trim(),email=String(input.email||'').trim().toLowerCase(),password=String(input.password||''),role=['agent','supervisor'].includes(input.role)?input.role:'agent'; if (name.length<2||name.length>80||!email.includes('@')||password.length<8) return json(response,400,{error:'Informe o nome que aparecerá nas mensagens, e-mail e senha de pelo menos 8 caracteres.'}); const user=await authRequest('admin/users','POST',{email,password,email_confirm:true},serviceKey); try { await db.transaction(async tx=>{ await tx.query('insert into public.profiles(id,company_id,auth_user_id,name,display_name,email,role,status) values($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),company,user.id,name,name,email,role,'available']); await audit(tx,session,'agent_created',user.id,'profile'); }); } catch(error) { await authRequest(`admin/users/${user.id}`,'DELETE',null,serviceKey).catch(()=>{}); throw error; } return json(response,201,{ok:true}); }
   if (request.method === 'POST' && url.pathname === '/api/queues') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),name=String(input.name||'').trim(); if (!name) return json(response,400,{error:'Informe o nome da fila.'}); await db.transaction(async tx=>{ const id=randomUUID(); await tx.query('insert into public.departments(id,company_id,name) values($1,$2,$3)',[id,company,name]); await audit(tx,session,'queue_created',id,'department'); }); return json(response,201,{ok:true}); }
@@ -241,6 +330,8 @@ async function handle(request, response) {
       await tx.query('select pg_advisory_xact_lock(hashtext($1))',[company]);
       let target=await tx.one("select id,name from public.automation_flows where company_id=$1 and status='published' order by updated_at desc limit 1 for update",[company]);
       if(!target){target={id:randomUUID(),name:'Atendimento SG Fibra'};await tx.query("insert into public.automation_flows(id,company_id,name,status) values($1,$2,$3,'draft')",[target.id,company,target.name]);}
+      await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and id<>$2 and status in ('published','draft')",[company,target.id]);
+      await tx.query("update public.automation_flow_versions set status='archived' where company_id=$1 and flow_id<>$2 and status in ('published','draft')",[company,target.id]);
       const next=await tx.one('select coalesce(max(version),0)+1 version from public.automation_flow_versions where company_id=$1 and flow_id=$2',[company,target.id]);
       await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,target.id]);
       await tx.query("update public.automation_flow_versions set status='archived' where company_id=$1 and flow_id=$2 and status='published'",[company,target.id]);
@@ -252,7 +343,7 @@ async function handle(request, response) {
     });
     return json(response,200,{ok:true,...result});
   }
-  if (request.method === 'GET' && url.pathname === '/api/flows') return json(response,200,{flows:await db.query('select * from public.automation_flows where company_id=$1 order by case status when \'published\' then 0 when \'draft\' then 1 else 2 end,updated_at desc',[company])});
+  if (request.method === 'GET' && url.pathname === '/api/flows') return json(response,200,{flows:await db.query("select * from public.automation_flows where company_id=$1 and status<>'archived' order by case status when 'published' then 0 when 'draft' then 1 else 2 end,updated_at desc",[company])});
   if (request.method === 'POST' && url.pathname === '/api/flows') {
     if (!admin(session)) return json(response,403,{error:'Sem permissão.'});
     const input=await body(request),name=String(input.name||'').trim();
@@ -271,7 +362,7 @@ async function handle(request, response) {
     if(!admin(session))return json(response,403,{error:'Sem permissão.'});
     if(request.method==='POST'&&pieces[3]==='activate'){
       if(!flow.published_version)return json(response,409,{error:'Publique a versão validada antes de ativar o robô.'});
-      await db.transaction(async tx=>{await tx.query('select pg_advisory_xact_lock(hashtext($1))',[company]);await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,flow.id]);await tx.query("update public.automation_flows set status='published',updated_at=now() where company_id=$1 and id=$2",[company,flow.id]);});
+      await db.transaction(async tx=>{await tx.query('select pg_advisory_xact_lock(hashtext($1))',[company]);await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and id<>$2 and status in ('published','draft')",[company,flow.id]);await tx.query("update public.automation_flow_versions set status='archived' where company_id=$1 and flow_id<>$2 and status in ('published','draft')",[company,flow.id]);await tx.query("update public.automation_flows set status='published',updated_at=now() where company_id=$1 and id=$2",[company,flow.id]);});
       return json(response,200,{ok:true,active:true});
     }
     if(request.method==='POST'&&pieces[3]==='disable'){await db.query("update public.automation_flows set status='archived',updated_at=now() where id=$1 and company_id=$2",[flow.id,company]);return json(response,200,{ok:true});}
@@ -280,7 +371,7 @@ async function handle(request, response) {
       if(publish){const departments=await db.query('select id from public.departments where company_id=$1',[company]);const errors=validateFlow(input.definition,{departments});if(errors.length)return json(response,400,{error:errors.join(' ')});}
       const version=await db.transaction(async tx=>{
         const latest=await tx.one('select coalesce(max(version),0)+1 version from public.automation_flow_versions where flow_id=$1 and company_id=$2',[flow.id,company]);
-        if(publish){await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,flow.id]);await tx.query("update public.automation_flow_versions set status='archived' where flow_id=$1 and company_id=$2 and status='published'",[flow.id,company]);}
+        if(publish){await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and id<>$2 and status in ('published','draft')",[company,flow.id]);await tx.query("update public.automation_flow_versions set status='archived' where company_id=$1 and flow_id<>$2 and status in ('published','draft')",[company,flow.id]);await tx.query("update public.automation_flow_versions set status='archived' where flow_id=$1 and company_id=$2 and status='published'",[flow.id,company]);}
         await tx.query('insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition,published_at) values($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),company,flow.id,latest.version,publish?'published':'draft',input.definition||{},publish?new Date():null]);
         await tx.query('update public.automation_flows set status=$1,published_version=$2,updated_at=now() where id=$3 and company_id=$4',[publish?'published':flow.status,publish?latest.version:flow.published_version,flow.id,company]);return latest.version;
       });
@@ -301,7 +392,7 @@ async function handle(request, response) {
   if(request.method==='GET'&&pieces.length===4&&pieces[3]==='sgp'){ response.setHeader('Cache-Control','no-store'); return json(response,200,await sgp.lookup(company,selected.contact_phone)); }
   const action=pieces[3],input=await body(request);
   if(request.method==='POST'&&action==='messages'&&String(session.profile.display_name||'').trim().length<2)return json(response,409,{error:'Antes de enviar, configure seu nome de atendente em Configurações → Meu nome no atendimento.'});
-  if (request.method==='POST'&&action==='messages') { const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,text,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',closed_at=null,assigned_profile_id=$1,channel_address=$4,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company,channelAddress||selected.contact_phone+'@s.whatsapp.net']);}); try{const sent=await connectorSend({phone:selected.contact_phone,jid:channelAddress,text,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent'});}catch(error){await db.query("update public.messages set delivery_status='failed',error_message=$1 where company_id=$2 and id=$3",[String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
+  if (request.method==='POST'&&action==='messages') { const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const transport=await selectedTransport(company); if(transport==='meta'&&attachment?.data)return json(response,501,{error:'Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'}); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,text,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',closed_at=null,assigned_profile_id=$1,channel_address=$4,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company,channelAddress||selected.contact_phone+'@s.whatsapp.net']);}); try{const sent=await sendOnSelectedTransport(company,{phone:selected.contact_phone,jid:channelAddress,text,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent',transport});}catch(error){await db.query("update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4",[error.uncertain?'unknown':'failed',String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
   if(request.method==='POST'&&action==='internal-notes'){const text=String(input.body||'').trim();if(!text)return json(response,400,{error:'Escreva a anotação interna.'});const noteId=randomUUID();await db.transaction(async tx=>{await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'internal','internal')",[noteId,company,id,session.profile.id,text]);await tx.query('insert into public.internal_notes(id,company_id,conversation_id,profile_id,body) values($1,$2,$3,$4,$5)',[noteId,company,id,session.profile.id,text]);await audit(tx,session,'internal_note_created',id);});return json(response,201,{ok:true});}
   if(request.method==='PATCH'&&action==='contact'){const name=String(input.name||'').trim(),raw=String(input.phone||selected.contact_phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw;if(!name)return json(response,400,{error:'Informe o nome do contato.'});if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});await db.query('update public.conversations set contact_name=$1,contact_phone=$2,channel_address=$3,updated_at=now() where company_id=$4 and id=$5',[name.slice(0,120),phone,phone+'@s.whatsapp.net',company,id]);return json(response,200,{ok:true});}
   if (request.method==='POST'&&action==='simulate') { const text=String(input.body||'').trim(); if (!text) return json(response,400,{error:'Escreva a mensagem simulada.'}); await db.transaction(async tx=>{ const c=await tx.one('select * from public.conversations where id=$1 and company_id=$2 for update',[id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,text,'inbound']); if (c.assigned_profile_id) return; const graphReply=await executePublishedFlow(tx,company,c,text); if(graphReply){if(graphReply.reply)await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,graphReply.reply,'outbound']);return;} const settings=await tx.one('select * from public.automation_settings where company_id=$1',[company]); if (!settings) return; const attempts=c.bot_attempts+1,financial=/financeiro|fatura|segunda via|boleto/i.test(text),queued=financial||attempts>=settings.max_attempts; const target=financial?await tx.one("select id from public.departments where company_id=$1 and name ilike '%financeiro%' limit 1",[company]):null; await tx.query('update public.conversations set department_id=$1,status=$2,bot_attempts=$3,updated_at=now() where id=$4 and company_id=$5',[target?.id||c.department_id,queued?'waiting':'open',attempts,id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,queued?settings.fallback_message:settings.welcome_message,'outbound']); await audit(tx,session,queued?'bot_queued':'bot_replied',id); }); return json(response,201,{ok:true}); }
