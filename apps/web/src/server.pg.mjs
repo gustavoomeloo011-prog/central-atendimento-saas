@@ -8,7 +8,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createPersistence } from './persistence.mjs';
 import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 import { dispatchConnector, syncConnector } from './connector-bridge.mjs';
-import { validateFlow, newFlow, advanceFlow } from '../public/flow.js';
+import { validateFlow, newFlow, advanceFlow, sgFibraRobotFlow } from '../public/flow.js';
 import { startCloudConnector, stopCloudConnector } from './cloud-connector.mjs';
 
 const db = createPersistence();
@@ -60,14 +60,14 @@ async function storeAttachment(company,conversationId,messageId,attachment) {
   if(!response.ok)throw Object.assign(new Error('Não foi possível guardar o anexo.'),{status:502});
   return {path,name:String(attachment.name||`arquivo.${extension}`).slice(0,180),type};
 }
-async function executePublishedFlow(tx,company,c,input){
+async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   if(c.assigned_profile_id)return null;
   let run=await tx.one('select * from public.flow_runs where company_id=$1 and conversation_id=$2 for update',[company,c.id]);
   if(run?.status!=='active'&&run)return {reply:null,queued:false};
   if(!run){
     const version=await tx.one("select f.id flow_id,v.id version_id from public.automation_flows f join public.automation_flow_versions v on v.flow_id=f.id and v.version=f.published_version where f.company_id=$1 and f.status='published' order by f.updated_at desc limit 1",[company]);
     if(!version)return null;
-    run=await tx.one("insert into public.flow_runs(conversation_id,company_id,flow_id,version_id,status) values($1,$2,$3,$4,'active') returning *",[c.id,company,version.flow_id,version.version_id]);
+    run=await tx.one("insert into public.flow_runs(conversation_id,company_id,flow_id,version_id,status,variables) values($1,$2,$3,$4,'active',$5) returning *",[c.id,company,version.flow_id,version.version_id,initialVariables]);
   }
   const version=await tx.one('select definition from public.automation_flow_versions where company_id=$1 and id=$2',[company,run.version_id]);
   if(!version)return {reply:null,queued:false};
@@ -158,16 +158,32 @@ async function handle(request, response) {
     if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
     const input=await body(request), company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''), phone=String(input.phone||'').replace(/\D/g,''), text=String(input.body||'').trim(),channelAddress=String(input.jid||'');
     if (!company || company !== process.env.WHATSAPP_COMPANY_ID || !phone || !text) return json(response,400,{error:'Empresa, telefone e mensagem são obrigatórios.'});
+    const inboundProviderId=String(input.message_id||'')||null;
+    if(inboundProviderId){const duplicate=await db.one('select conversation_id from public.messages where provider_message_id=$1',[inboundProviderId]);if(duplicate)return json(response,200,{ok:true,conversation_id:duplicate.conversation_id,reply:null,duplicate:true});}
+    // Look up SGP only when this conversation is about to start a robot run.
+    // The adapter caches and coalesces requests; no SGP credentials/data leave the backend.
+    const [activeFlow,existingRun]=await Promise.all([
+      db.one("select id from public.automation_flows where company_id=$1 and status='published' limit 1",[company]),
+      db.one("select c.id,c.assigned_profile_id,fr.status as run_status from public.conversations c left join public.flow_runs fr on fr.company_id=c.company_id and fr.conversation_id=c.id where c.company_id=$1 and (c.channel_address=$2 or c.contact_phone=$3) and c.status<>'closed' order by c.updated_at desc limit 1",[company,channelAddress||null,phone])
+    ]);
+    const shouldLookup=Boolean(activeFlow&&!existingRun?.assigned_profile_id&&!existingRun?.run_status);
+    const sgpResult=shouldLookup?await sgp.lookup(company,phone):{status:'not_checked'};
+    const initialVariables={
+      client_found:sgpResult.status==='found',
+      client_name:sgpResult.status==='found'?String(sgpResult.customer?.name||'').slice(0,120):'',
+      client_lookup_status:sgpResult.status
+    };
     const result=await db.transaction(async tx => {
       let c=await tx.one("select * from public.conversations where company_id=$1 and (channel_address=$2 or contact_phone=$3) and status<>'closed' order by updated_at desc limit 1 for update",[company,channelAddress||null,phone]);
       if (!c) { const d=await tx.one('select id from public.departments where company_id=$1 order by id limit 1',[company]); if (!d) throw Object.assign(new Error('Empresa sem fila.'),{status:409});
         const id=randomUUID(), protocol=(await tx.one('select public.next_protocol($1) protocol',[company])).protocol;
         c=await tx.one('insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *',[id,company,d.id,input.name||phone,phone,channelAddress||null,'WhatsApp','waiting','normal',d.id,protocol]); }
       else if(channelAddress&&!c.channel_address){c=await tx.one('update public.conversations set channel_address=$1,contact_phone=case when length($2) between 10 and 15 then $2 else contact_phone end,updated_at=now() where company_id=$3 and id=$4 returning *',[channelAddress,phone,company,c.id]);}
-      const providerId=String(input.message_id||'')||null;
+      const providerId=inboundProviderId;
       if (providerId && await tx.one('select id from public.messages where provider_message_id=$1',[providerId])) return {conversation_id:c.id,protocol:c.protocol,reply:null,duplicate:true};
       await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,$5,$6,'received')",[randomUUID(),company,c.id,text,'inbound',providerId]);
-      const graphReply=await executePublishedFlow(tx,company,c,text);
+      if(sgpResult.status==='found'&&!c.assigned_profile_id) await tx.query("update public.conversations set contact_name=$1 where company_id=$2 and id=$3 and (contact_name is null or contact_name='' or contact_name=contact_phone)",[String(sgpResult.customer?.name||phone).slice(0,180),company,c.id]);
+      const graphReply=await executePublishedFlow(tx,company,c,text,initialVariables);
       if(graphReply)return {conversation_id:c.id,protocol:c.protocol,...graphReply};
       const settings=await tx.one('select * from public.automation_settings where company_id=$1',[company]);
       if (c.assigned_profile_id || c.status==='closed' || !settings) return {conversation_id:c.id,protocol:c.protocol,reply:null};
@@ -204,9 +220,63 @@ async function handle(request, response) {
   if (request.method === 'POST' && url.pathname === '/api/queues') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),name=String(input.name||'').trim(); if (!name) return json(response,400,{error:'Informe o nome da fila.'}); await db.transaction(async tx=>{ const id=randomUUID(); await tx.query('insert into public.departments(id,company_id,name) values($1,$2,$3)',[id,company,name]); await audit(tx,session,'queue_created',id,'department'); }); return json(response,201,{ok:true}); }
   if (request.method === 'POST' && url.pathname === '/api/automation') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),welcome=String(input.welcome_message||'').trim(),fallback=String(input.fallback_message||'').trim(),attempts=Math.max(1,Math.min(5,Number(input.max_attempts)||2)); if (!welcome||!fallback) return json(response,400,{error:'Preencha as mensagens.'}); await db.transaction(async tx=>{ await tx.query('insert into public.automation_settings(company_id,welcome_message,fallback_message,max_attempts) values($1,$2,$3,$4) on conflict(company_id) do update set welcome_message=excluded.welcome_message,fallback_message=excluded.fallback_message,max_attempts=excluded.max_attempts',[company,welcome,fallback,attempts]); await audit(tx,session,'automation_updated',company,'automation'); }); return json(response,200,{ok:true}); }
   if (request.method === 'POST' && url.pathname === '/api/quick-replies') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),shortcut=String(input.shortcut||'').trim(),reply=String(input.body||'').trim(); if (!shortcut.startsWith('/')||!reply) return json(response,400,{error:'Atalho e mensagem inválidos.'}); await db.query('insert into public.quick_replies(id,company_id,shortcut,body,department_id) values($1,$2,$3,$4,$5)',[randomUUID(),company,shortcut,reply,input.department_id||null]); return json(response,201,{ok:true}); }
-  if (request.method === 'GET' && url.pathname === '/api/flows') return json(response,200,{flows:await db.query('select * from public.automation_flows where company_id=$1 order by updated_at desc',[company])});
-  if (request.method === 'POST' && url.pathname === '/api/flows') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),name=String(input.name||'').trim(); if (!name) return json(response,400,{error:'Informe o nome do fluxo.'}); const id=randomUUID(); await db.transaction(async tx=>{ await tx.query('insert into public.automation_flows(id,company_id,name) values($1,$2,$3)',[id,company,name]); await tx.query('insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition) values($1,$2,$3,1,$4,$5)',[randomUUID(),company,id,'draft',input.definition||newFlow()]); }); return json(response,201,{id,version:1}); }
-  if (pieces[0]==='api' && pieces[1]==='flows' && pieces[2]) { const flow=await db.one('select * from public.automation_flows where id=$1 and company_id=$2',[pieces[2],company]); if (!flow) return json(response,404,{error:'Fluxo não encontrado.'}); if (request.method==='GET') return json(response,200,{flow,versions:await db.query('select * from public.automation_flow_versions where company_id=$1 and flow_id=$2 order by version desc',[company,flow.id])}); if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); if(request.method==='POST'&&pieces[3]==='disable'){await db.query("update public.automation_flows set status='archived',updated_at=now() where id=$1 and company_id=$2",[flow.id,company]);return json(response,200,{ok:true});} if ((request.method==='POST'&&pieces[3]==='publish')||request.method==='PUT') { const input=await body(request),publish=pieces[3]==='publish'; if(publish){const departments=await db.query('select id from public.departments where company_id=$1',[company]);const errors=validateFlow(input.definition,{departments});if(errors.length)return json(response,400,{error:errors.join(' ')});} const version=await db.transaction(async tx=>{ const latest=await tx.one('select coalesce(max(version),0)+1 version from public.automation_flow_versions where flow_id=$1 and company_id=$2',[flow.id,company]); if (publish) await tx.query("update public.automation_flow_versions set status='archived' where flow_id=$1 and company_id=$2 and status='published'",[flow.id,company]); await tx.query('insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition,published_at) values($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),company,flow.id,latest.version,publish?'published':'draft',input.definition||{},publish?new Date():null]); await tx.query('update public.automation_flows set status=$1,published_version=$2,updated_at=now() where id=$3 and company_id=$4',[publish?'published':flow.status,publish?latest.version:flow.published_version,flow.id,company]); return latest.version; }); return json(response,200,{ok:true,version}); } }
+  if(request.method==='POST'&&url.pathname==='/api/flows/sg-fibra/install'){
+    if(!admin(session))return json(response,403,{error:'Sem permissão.'});
+    const departments=await db.query('select id,name from public.departments where company_id=$1 order by name',[company]);
+    if(!departments.length)return json(response,409,{error:'Cadastre ao menos uma fila antes de ativar o robô.'});
+    const pick=pattern=>departments.find(item=>pattern.test(item.name))?.id||departments[0].id;
+    const definition=sgFibraRobotFlow({supportDepartmentId:pick(/suporte|t[eé]cnic|reparo/i),financeDepartmentId:pick(/financeir|cobran/i),salesDepartmentId:pick(/venda|comercial/i)});
+    const errors=validateFlow(definition,{departments});if(errors.length)return json(response,409,{error:errors.join(' ')});
+    const result=await db.transaction(async tx=>{
+      await tx.query('select pg_advisory_xact_lock(hashtext($1))',[company]);
+      let target=await tx.one("select id,name from public.automation_flows where company_id=$1 and status='published' order by updated_at desc limit 1 for update",[company]);
+      if(!target){target={id:randomUUID(),name:'Atendimento SG Fibra'};await tx.query("insert into public.automation_flows(id,company_id,name,status) values($1,$2,$3,'draft')",[target.id,company,target.name]);}
+      const next=await tx.one('select coalesce(max(version),0)+1 version from public.automation_flow_versions where company_id=$1 and flow_id=$2',[company,target.id]);
+      await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,target.id]);
+      await tx.query("update public.automation_flow_versions set status='archived' where company_id=$1 and flow_id=$2 and status='published'",[company,target.id]);
+      const versionId=randomUUID();
+      await tx.query("insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition,published_at) values($1,$2,$3,$4,'published',$5,now())",[versionId,company,target.id,next.version,definition]);
+      await tx.query("update public.automation_flows set status='published',published_version=$1,updated_at=now() where company_id=$2 and id=$3",[next.version,company,target.id]);
+      return {id:target.id,version:next.version};
+    });
+    return json(response,200,{ok:true,...result});
+  }
+  if (request.method === 'GET' && url.pathname === '/api/flows') return json(response,200,{flows:await db.query('select * from public.automation_flows where company_id=$1 order by case status when \'published\' then 0 when \'draft\' then 1 else 2 end,updated_at desc',[company])});
+  if (request.method === 'POST' && url.pathname === '/api/flows') {
+    if (!admin(session)) return json(response,403,{error:'Sem permissão.'});
+    const input=await body(request),name=String(input.name||'').trim();
+    if(!name)return json(response,400,{error:'Informe o nome do fluxo.'});
+    const id=randomUUID();
+    await db.transaction(async tx=>{
+      await tx.query('insert into public.automation_flows(id,company_id,name) values($1,$2,$3)',[id,company,name]);
+      await tx.query('insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition) values($1,$2,$3,1,$4,$5)',[randomUUID(),company,id,'draft',input.definition||newFlow()]);
+    });
+    return json(response,201,{id,version:1});
+  }
+  if (pieces[0]==='api' && pieces[1]==='flows' && pieces[2]) {
+    const flow=await db.one('select * from public.automation_flows where id=$1 and company_id=$2',[pieces[2],company]);
+    if(!flow)return json(response,404,{error:'Fluxo não encontrado.'});
+    if(request.method==='GET')return json(response,200,{flow,versions:await db.query('select * from public.automation_flow_versions where company_id=$1 and flow_id=$2 order by version desc',[company,flow.id])});
+    if(!admin(session))return json(response,403,{error:'Sem permissão.'});
+    if(request.method==='POST'&&pieces[3]==='activate'){
+      if(!flow.published_version)return json(response,409,{error:'Publique a versão validada antes de ativar o robô.'});
+      await db.transaction(async tx=>{await tx.query('select pg_advisory_xact_lock(hashtext($1))',[company]);await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,flow.id]);await tx.query("update public.automation_flows set status='published',updated_at=now() where company_id=$1 and id=$2",[company,flow.id]);});
+      return json(response,200,{ok:true,active:true});
+    }
+    if(request.method==='POST'&&pieces[3]==='disable'){await db.query("update public.automation_flows set status='archived',updated_at=now() where id=$1 and company_id=$2",[flow.id,company]);return json(response,200,{ok:true});}
+    if((request.method==='POST'&&pieces[3]==='publish')||request.method==='PUT'){
+      const input=await body(request),publish=pieces[3]==='publish';
+      if(publish){const departments=await db.query('select id from public.departments where company_id=$1',[company]);const errors=validateFlow(input.definition,{departments});if(errors.length)return json(response,400,{error:errors.join(' ')});}
+      const version=await db.transaction(async tx=>{
+        const latest=await tx.one('select coalesce(max(version),0)+1 version from public.automation_flow_versions where flow_id=$1 and company_id=$2',[flow.id,company]);
+        if(publish){await tx.query("update public.automation_flows set status='archived',updated_at=now() where company_id=$1 and status='published' and id<>$2",[company,flow.id]);await tx.query("update public.automation_flow_versions set status='archived' where flow_id=$1 and company_id=$2 and status='published'",[flow.id,company]);}
+        await tx.query('insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition,published_at) values($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),company,flow.id,latest.version,publish?'published':'draft',input.definition||{},publish?new Date():null]);
+        await tx.query('update public.automation_flows set status=$1,published_version=$2,updated_at=now() where id=$3 and company_id=$4',[publish?'published':flow.status,publish?latest.version:flow.published_version,flow.id,company]);return latest.version;
+      });
+      return json(response,200,{ok:true,version});
+    }
+    if(request.method==='PUT')return json(response,200,{ok:true});
+  }
   if(request.method==='POST'&&url.pathname==='/api/conversations'){
     const input=await body(request),raw=String(input.phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw,name=String(input.name||'').trim()||phone;
     if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});

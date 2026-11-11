@@ -201,7 +201,7 @@ async function openPanel(type) {
     document.querySelector('#manageTeam').onclick = settings;
   } else if (type === 'automations') {
     const flows = (await api('/api/flows')).flows;
-    const cards = flows.length ? flows.map(flow => '<article class="card"><span class="tag">' + esc(flow.status) + '</span><h3>' + esc(flow.name) + '</h3><p class="muted">Versão publicada: ' + esc(flow.published_version || 'nenhuma') + '</p></article>').join('') : '<article class="card"><h3>Nenhum fluxo cadastrado</h3><p class="muted">Crie o primeiro fluxo no editor visual.</p></article>';
+    const cards = flows.length ? flows.map(flow => '<article class="card"><span class="tag">' + esc(flow.status === 'published' ? 'ATIVO' : flow.status) + '</span><h3>' + esc(flow.name) + '</h3><p class="muted">Versão publicada: ' + esc(flow.published_version || 'nenhuma') + '</p></article>').join('') : '<article class="card"><h3>Nenhum fluxo cadastrado</h3><p class="muted">Abra o editor visual e configure o atendimento SG Fibra.</p></article>';
     app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Automações</h2><p class="muted">Crie caminhos de atendimento com blocos conectados e teste antes de publicar.</p></div><button class="btn" id="manageAutomation">Abrir editor visual</button></div><div class="settingsGrid">' + cards + '</div></section>', 'Automações');
     document.querySelector('#manageAutomation').onclick = automationEditor;
   } else {
