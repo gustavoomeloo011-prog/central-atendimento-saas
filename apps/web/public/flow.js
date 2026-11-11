@@ -78,10 +78,11 @@ export function sgFibraRobotFlow({supportDepartmentId='',financeDepartmentId='',
   const describe=add('wait','Descrever problema','Por favor, descreva brevemente o que está acontecendo.');
   edge(support,support.options[2].id,describe);transfer(describe,'Outro problema técnico',supportDepartmentId);
 
-  const finance=add('question','Financeiro','Como podemos ajudar?',['Solicitar liberação de sinal por 24 horas','Falar com atendente']);
+  const finance=add('question','Financeiro','Como podemos ajudar?',['2ª via da fatura','Solicitar liberação de sinal por 24 horas','Falar com atendente']);
   edge(clientMenu,clientMenu.options[1].id,finance);edge(unknownClientMenu,unknownClientMenu.options[1].id,finance);
-  transfer(finance,'Solicitação de liberação de sinal',financeDepartmentId,'Vou encaminhar sua solicitação de liberação de sinal por 24 horas para a equipe financeira verificar.',finance.options[0].id);
-  transfer(finance,'Atendimento financeiro',financeDepartmentId,'Vou chamar um atendente do financeiro para continuar com você.',finance.options[1].id);
+  transfer(finance,'Segunda via da fatura',financeDepartmentId,'Vou encaminhar seu pedido de segunda via para o Financeiro. Depois que a fatura for enviada, o atendente poderá encerrar este atendimento.',finance.options[0].id);
+  transfer(finance,'Solicitação de liberação de sinal',financeDepartmentId,'Vou encaminhar sua solicitação de liberação de sinal por 24 horas para a equipe financeira verificar.',finance.options[1].id);
+  transfer(finance,'Atendimento financeiro',financeDepartmentId,'Vou chamar um atendente do financeiro para continuar com você.',finance.options[2].id);
   transfer(clientMenu,'Atendimento humano',supportDepartmentId,'Vou chamar um atendente para continuar com você.',clientMenu.options[2].id);
   transfer(unknownClientMenu,'Atendimento humano',supportDepartmentId,'Vou chamar um atendente para continuar com você.',unknownClientMenu.options[2].id);
   const salesDepartment=salesDepartmentId||supportDepartmentId;

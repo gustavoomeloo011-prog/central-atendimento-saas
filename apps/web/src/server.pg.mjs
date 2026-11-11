@@ -74,6 +74,8 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   const result=advanceFlow(version.definition,{nodeId:run.node_id,steps:run.steps,variables:run.variables},run.node_id?input:null);
   await tx.query('update public.flow_runs set node_id=$1,steps=$2,variables=$3,status=$4,updated_at=now() where company_id=$5 and conversation_id=$6',[result.nodeId,result.steps,result.variables,result.finished?'finished':'active',company,c.id]);
   if(result.transfer)await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',updated_at=now() where company_id=$3 and id=$4",[result.transfer.departmentId,result.transfer.profileId,company,c.id]);
+  const reachedEnd=result.executed.some(nodeId=>version.definition.nodes.some(node=>node.id===nodeId&&node.type==='end'));
+  if(reachedEnd)await tx.query("update public.conversations set status='closed',closed_at=coalesce(closed_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
   const reply=result.output.filter(item=>item.type==='message').map(item=>item.text+(item.options?.length?'\n'+item.options.map((option,index)=>`${index+1}. ${option.label}`).join('\n'):'' )).join('\n\n');
   return {reply:reply||null,queued:Boolean(result.transfer)};
 }
@@ -168,10 +170,18 @@ async function handle(request, response) {
     ]);
     const shouldLookup=Boolean(activeFlow&&!existingRun?.assigned_profile_id&&!existingRun?.run_status);
     const sgpResult=shouldLookup?await sgp.lookup(company,phone):{status:'not_checked'};
+    const sgpServices=(sgpResult.status==='found'?sgpResult.customer?.contracts||[]:[]).flatMap(contract=>contract.services||[]);
+    const internetService=sgpServices.find(service=>service.type==='internet')||null;
+    const invoiceSummary=sgpResult.status==='found'?sgpResult.customer?.invoices:null;
     const initialVariables={
       client_found:sgpResult.status==='found',
       client_name:sgpResult.status==='found'?String(sgpResult.customer?.name||'').slice(0,120):'',
-      client_lookup_status:sgpResult.status
+      client_lookup_status:sgpResult.status,
+      internet_online:internetService?.online??null,
+      fiber_rx_dbm:internetService?.rxDbm??null,
+      fiber_tx_dbm:internetService?.txDbm??null,
+      open_invoice_count:invoiceSummary?.count??null,
+      overdue_invoice_count:invoiceSummary?.overdue??null
     };
     const result=await db.transaction(async tx => {
       let c=await tx.one("select * from public.conversations where company_id=$1 and (channel_address=$2 or contact_phone=$3) and status<>'closed' order by updated_at desc limit 1 for update",[company,channelAddress||null,phone]);
@@ -237,6 +247,7 @@ async function handle(request, response) {
       const versionId=randomUUID();
       await tx.query("insert into public.automation_flow_versions(id,company_id,flow_id,version,status,definition,published_at) values($1,$2,$3,$4,'published',$5,now())",[versionId,company,target.id,next.version,definition]);
       await tx.query("update public.automation_flows set status='published',published_version=$1,updated_at=now() where company_id=$2 and id=$3",[next.version,company,target.id]);
+      await audit(tx,session,'robot_flow_activated',target.id,'automation');
       return {id:target.id,version:next.version};
     });
     return json(response,200,{ok:true,...result});
