@@ -1,8 +1,8 @@
--- Protocolos SG persistentes por empresa e índice para retenção de atendimentos.
--- A migração preserva todos os registros encerrados existentes por 24h após
--- a aplicação, em vez de removê-los imediatamente no primeiro deploy.
+-- Add closed-attendance retention metadata and SG + 11-digit protocols.
+-- Existing protocol values are preserved. Only missing protocols are backfilled.
 
 alter table public.conversations add column if not exists closed_at timestamptz;
+
 update public.conversations
    set closed_at = now()
  where status = 'closed'
@@ -12,52 +12,24 @@ create index if not exists conversations_closed_retention_idx
     on public.conversations(company_id, closed_at, id)
  where status = 'closed';
 
--- Reatribui os protocolos já existentes para o padrão SG + 11 dígitos,
--- preservando a unicidade e atualizando a cópia usada pelas avaliações.
-update public.conversations
-   set protocol = 'MIGRATING-' || id;
-
-with numbered as (
-  select id, company_id,
-         row_number() over (partition by company_id order by created_at, id) as seq
-    from public.conversations
-)
-update public.conversations c
-   set protocol = 'SG' || lpad(n.seq::text, 11, '0')
-  from numbered n
- where c.company_id = n.company_id
-   and c.id = n.id;
-
-update public.conversation_ratings r
-   set protocol = c.protocol
-  from public.conversations c
- where c.company_id = r.company_id
-   and c.id = r.conversation_id;
-
-alter table public.conversations alter column protocol set not null;
-do $$ begin
-  if not exists (select 1 from pg_constraint where conname = 'conversations_protocol_sg_format') then
-    alter table public.conversations
-      add constraint conversations_protocol_sg_format
-      check (protocol ~ '^SG[0-9]{11}$');
-  end if;
-end $$;
-
 create table if not exists public.protocol_sequences (
   company_id text primary key references public.companies(id) on delete cascade,
   value bigint not null default 0 check (value >= 0 and value <= 99999999999),
   updated_at timestamptz not null default now()
 );
+
 alter table public.protocol_sequences enable row level security;
 drop policy if exists protocol_sequences_tenant_read on public.protocol_sequences;
 create policy protocol_sequences_tenant_read
   on public.protocol_sequences for select to authenticated
   using (company_id = public.current_company_id());
 
+-- Continue after the highest existing SG protocol so the unique index remains safe.
 insert into public.protocol_sequences(company_id, value)
-select company_id, count(*)::bigint
-  from public.conversations
- group by company_id
+select c.company_id,
+       coalesce(max((substring(c.protocol from '^SG([0-9]{11})$'))::bigint), 0)
+  from public.conversations c
+ group by c.company_id
 on conflict(company_id) do update
   set value = greatest(public.protocol_sequences.value, excluded.value),
       updated_at = now();
@@ -85,5 +57,28 @@ begin
   return 'SG' || lpad(n::text, 11, '0');
 end;
 $$;
+
 revoke execute on function public.next_protocol(text) from public, anon, authenticated;
 grant execute on function public.next_protocol(text) to service_role;
+
+-- Backfill only rows that have no protocol; do not change historical references.
+with missing as (
+  select id, company_id
+    from public.conversations
+   where protocol is null or btrim(protocol) = ''
+   order by company_id, created_at, id
+)
+update public.conversations c
+   set protocol = public.next_protocol(c.company_id)
+  from missing m
+ where c.id = m.id
+   and c.company_id = m.company_id;
+
+update public.conversation_ratings r
+   set protocol = c.protocol
+  from public.conversations c
+ where c.company_id = r.company_id
+   and c.id = r.conversation_id
+   and r.protocol is null;
+
+alter table public.conversations alter column protocol set not null;
