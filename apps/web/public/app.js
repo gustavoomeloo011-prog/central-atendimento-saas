@@ -1,3 +1,4 @@
+import { inQueue } from './queues.js';
 import { renderSgp } from './sgp-panel.js';
 import { showFlowEditor } from './flow-editor.js';
 const app = document.querySelector('#app');
@@ -7,6 +8,7 @@ let state = {};
 let activeId = null;
 let menuClosed = localStorage.getItem('central_menu_closed') === null ? matchMedia('(max-width: 850px)').matches : localStorage.getItem('central_menu_closed') === '1';
 let inboxMode = 'general';
+let protocolQuery = '';
 let mobilePane = 'list';
 let whatsappMode = 'qr';
 let replyTo = null;
@@ -23,7 +25,6 @@ async function loadSgp(id) {
   const panel=document.querySelector('#sgpDetails');
   if(activeId===id&&panel)panel.innerHTML=renderSgp(value);
 }
-
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -57,7 +58,8 @@ async function boot() {
   try {
     sgpData.clear();
     state = await api('/api/bootstrap');
-    activeId = state.conversations[0]?.id || null;
+    const visible = item => inQueue(item,inboxMode,state.profile.id);
+    activeId = (state.conversations || []).find(visible)?.id || null;
     state.detail = null;
     render();
     if (activeId) await openConversation(activeId);
@@ -77,7 +79,7 @@ async function refreshLive() {
     const detail = activeId ? await api('/api/conversations/' + activeId) : null;
     const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
     const after = JSON.stringify([(next.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
-    if (before !== after) { state = {...next,detail}; render(); }
+    if (before !== after || (inboxMode === 'closed' && document.querySelector('.list'))) { state = {...next,detail}; render(); }
   } catch {}
 }
 
@@ -86,7 +88,7 @@ function messageHtml(message) {
   const attachment = message.attachment_path ? '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>' : '';
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
-  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + esc(internal ? '🔒 ' + message.author_name : message.author_name) + '</b>' + reply + '<div>' + esc(message.body) + '</div>' + attachment + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
+  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + esc((internal ? '🔒 ' : '') + (message.author_name || 'Atendente') + ':') + '</b>' + reply + '<div>' + esc(message.body) + '</div>' + attachment + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
 }
 
 async function openConversation(id) {
@@ -103,37 +105,73 @@ function shell(content, title = 'Caixa de entrada') {
 
 function render() {
   const list = [...(state.conversations || [])].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
-  const visibleList = list.filter(item => inboxMode === 'general' ? (!item.assigned_profile_id && item.status !== 'closed') : item.assigned_profile_id === state.profile.id);
+  const isInInboxMode = item => inQueue(item,inboxMode,state.profile.id);
+  const matchesProtocol = item => !protocolQuery || String(item.protocol || '').toUpperCase().includes(protocolQuery.replace(/\s/g, '').toUpperCase());
+  const isVisibleInList = item => matchesProtocol(item) && (protocolQuery ? true : isInInboxMode(item));
   const conversation = list.find(item => item.id === activeId);
   const messages = state.detail?.conversation?.id === activeId ? state.detail.messages : [];
-  const inbox = '<section class="list"><div class="toolbar"><span class="tag">FILA ' + list.filter(item => item.status === 'waiting').length + '</span><button class="btn subtle" id="refresh">Atualizar</button></div>' + list.map(item => '<article class="conversation ' + (item.id === activeId ? 'active' : '') + '" data-id="' + item.id + '"><b>' + esc(item.contact_name) + '</b> <span class="tag ' + item.status + '">' + esc(item.status) + '</span><div class="muted">' + esc(item.last_message || item.subject) + '</div><small>' + esc(item.department_name) + ' · ' + esc(item.contact_phone) + '</small></article>').join('') + '</section>';
+  const queueCount = list.filter(isInInboxMode).length;
+  const inbox = '<section class="list"><div class="toolbar"><span class="tag">FILA ' + queueCount + '</span>' + (inboxMode === 'closed' ? '<small class="retentionHint" title="Encerrados saem desta lista após 24 horas; o histórico é preservado">Sai da lista após 24h</small>' : '') + '<button class="btn subtle" id="refresh">Atualizar</button><label class="protocolSearch"><span>⌕</span><input id="protocolSearch" type="search" autocomplete="off" placeholder="Buscar protocolo…" aria-label="Buscar atendimento por protocolo" value="' + esc(protocolQuery) + '"></label></div>' + list.map(item => '<article class="conversation ' + (item.id === activeId ? 'active' : '') + '" data-id="' + item.id + '" data-protocol="' + esc(item.protocol || '') + '"' + (isVisibleInList(item) ? '' : ' hidden') + '><b>' + esc(item.contact_name) + '</b> <span class="tag ' + item.status + '">' + esc(item.status) + '</span><div class="muted">' + esc(item.last_message || item.subject) + '</div><small>' + esc(item.department_name) + ' · ' + esc(item.contact_phone) + '</small><small class="protocolLabel">' + esc(item.protocol || 'Protocolo pendente') + '</small></article>').join('') + '</section>';
   const shortcuts = (state.quickReplies || []).map(reply => '<button class="quick" data-quick="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('');
   const quickDock = '<div class="quickDock"><button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette">' + shortcuts + '</div></div>';
   const client = conversation ? '<aside class="clientPanel"><div class="panelTitle"><span class="tag">CLIENTE</span><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">Dados operacionais</span></div><div class="clientStatus"><span class="dot"></span><b>' + esc(conversation.status) + '</b><span class="muted"> · ' + esc(conversation.priority || 'normal') + '</span></div><dl class="clientData"><dt>Telefone</dt><dd>' + esc(conversation.contact_phone || 'Não informado') + '</dd><dt>Assunto</dt><dd>' + esc(conversation.subject || 'Não informado') + '</dd><dt>Fila</dt><dd>' + esc(conversation.department_name || conversation.department_id || 'Não informado') + '</dd><dt>Responsável</dt><dd>' + esc(conversation.assigned_name || 'Ainda não atribuído') + '</dd></dl><div class="sgpBox" id="sgpDetails" aria-live="polite">' + renderSgp(sgpData.get(activeId)?.value) + '</div></aside>' : '<aside class="clientPanel empty">Selecione um atendimento para ver os dados do cliente.</aside>';
   const replyPreview = replyTo ? '<div class="replyPreview"><span>Respondendo: ' + esc(replyTo.body) + '</span><button type="button" id="cancelReply">×</button></div>' : '';
-  const chat = conversation ? '<section class="chat"><div class="mobileChatNav"><button class="btn subtle" id="backToList">← Conversas</button><button class="btn subtle" id="showClient">Dados do cliente</button></div><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span><button class="linkButton" id="renameContact">Editar nome</button></div><div class="chatActions"><button class="btn subtle" id="internalNote">🔒 Nota interna</button><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="messages">' + messages.map(messageHtml).join('') + '</div>' + replyPreview + '<form class="composer" id="send"><input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf" hidden><button class="attachButton" id="attachButton" type="button" title="Anexar foto, vídeo ou PDF">＋</button><textarea name="body" placeholder="Escreva uma mensagem"></textarea><span class="attachmentName" id="attachmentName"></span><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
+  const chat = conversation ? '<section class="chat"><div class="mobileChatNav"><button class="btn subtle" id="backToList">← Conversas</button><button class="btn subtle" id="showClient">Dados do cliente</button></div><div class="chatHead"><div><h2>' + esc(conversation.contact_name) + '</h2><span class="muted">' + esc(conversation.contact_phone) + ' · ' + esc(conversation.subject) + '</span><div class="protocolHeader">Protocolo <b>' + esc(conversation.protocol || 'Aguardando geração') + '</b>' + (conversation.protocol ? '<button type="button" class="linkButton" id="copyProtocol">Copiar</button>' : '') + '</div><button class="linkButton" id="renameContact">Editar nome</button></div><div class="chatActions"><button class="btn subtle" id="internalNote">🔒 Nota interna</button><button class="btn subtle" id="simulate">Simular cliente</button><button class="btn subtle" id="assume">Assumir</button><button class="btn subtle" id="transfer">Transferir</button><button class="btn subtle" id="close">Encerrar</button></div></div><div class="messages">' + messages.map(messageHtml).join('') + '</div>' + replyPreview + '<form class="composer" id="send"><input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf" hidden><button class="attachButton" id="attachButton" type="button" title="Anexar foto, vídeo ou PDF">＋</button><textarea name="body" placeholder="Escreva uma mensagem"></textarea><span class="attachmentName" id="attachmentName"></span><button class="btn">Enviar</button></form></section>' : '<section class="chat empty">Selecione uma conversa.</section>';
   app.innerHTML = shell(inbox + chat + client);
   document.querySelector('.shell').dataset.mobilePane = mobilePane;
   const clientPanel = document.querySelector('.clientPanel');
   if (clientPanel) clientPanel.insertAdjacentHTML('afterbegin', '<button class="btn subtle mobileClientBack" id="backToChat">← Voltar ao chat</button>');
   const listToolbar = document.querySelector('.list .toolbar');
   if (listToolbar) {
-    const mode = document.createElement('div'); mode.className = 'inboxModes'; mode.innerHTML = '<button class="btn subtle" type="button">Geral</button><button class="btn subtle" type="button">Meus</button><button class="btn" id="newConversation" type="button">＋ Nova conversa</button>';
-    mode.children[0].onclick = () => { inboxMode = 'general'; render(); };
-    mode.children[1].onclick = () => { inboxMode = 'mine'; render(); };
+    const modes = [
+      { id: 'general', symbol: '◉', label: 'Geral' },
+      { id: 'mine', symbol: '👤', label: 'Meus atendimentos' },
+      { id: 'closed', symbol: '✓', label: 'Encerrados' }
+    ];
+    const mode = document.createElement('div'); mode.className = 'inboxModes';
+    mode.innerHTML = modes.map(item => '<button class="btn queueMode ' + (inboxMode === item.id ? '' : 'subtle') + '" type="button" data-inbox-mode="' + item.id + '" aria-label="' + item.label + '" title="' + item.label + '">' + item.symbol + '</button>').join('') + '<button class="btn" id="newConversation" type="button" aria-label="Nova conversa" title="Nova conversa">＋</button>';
+    mode.querySelectorAll('[data-inbox-mode]').forEach(button => {
+      button.onclick = () => {
+        inboxMode = button.dataset.inboxMode;
+        protocolQuery = '';
+        const next = list.find(isInInboxMode);
+        const selectedStillVisible = list.some(item => item.id === activeId && isInInboxMode(item));
+        if (!selectedStillVisible) {
+          activeId = next?.id || null;
+          state.detail = null;
+        }
+        render();
+        if (next && activeId === next.id && state.detail?.conversation?.id !== next.id) openConversation(next.id);
+      };
+    });
     mode.querySelector('#newConversation').onclick=async()=>{const phone=prompt('DDD + número do WhatsApp (ex.: 11999999999)');if(!phone)return;const name=prompt('Nome do contato (opcional)')||'';try{const result=await api('/api/conversations',{method:'POST',body:JSON.stringify({phone,name})});await boot();await openConversation(result.conversation.id);}catch(error){alert(error.message);}};
     listToolbar.prepend(mode);
-    document.querySelectorAll('.conversation').forEach(card => { const item = list.find(entry => entry.id === card.dataset.id); card.hidden = inboxMode === 'general' ? Boolean(item?.assigned_profile_id || item?.status === 'closed') : item?.assigned_profile_id !== state.profile.id; });
   }
   const brand = document.querySelector('.side h2'); if (brand) brand.textContent = 'Atendimento SG Fibra';
   bindShell();
   document.querySelector('#refresh').onclick = boot;
+  const protocolInput = document.querySelector('#protocolSearch');
+  if (protocolInput) protocolInput.oninput = () => {
+    protocolQuery = protocolInput.value;
+    document.querySelectorAll('.conversation').forEach(element => {
+      const protocol = element.dataset.protocol || '';
+      const matches = !protocolQuery || protocol.toUpperCase().includes(protocolQuery.replace(/\s/g, '').toUpperCase());
+      const row = list.find(item => item.id === element.dataset.id);
+      element.hidden = !(matches && row && (protocolQuery || isInInboxMode(row)));
+    });
+  };
+  if (protocolInput) protocolInput.onkeydown = event => { if (event.key === 'Enter') { const match = list.find(matchesProtocol); if (match) { event.preventDefault(); openConversation(match.id); } } };
   if (document.querySelector('#backToList')) document.querySelector('#backToList').onclick = () => { mobilePane = 'list'; render(); };
   if (document.querySelector('#showClient')) document.querySelector('#showClient').onclick = () => { mobilePane = 'client'; render(); };
   if (document.querySelector('#backToChat')) document.querySelector('#backToChat').onclick = () => { mobilePane = 'chat'; render(); };
   document.querySelectorAll('.conversation').forEach(element => element.onclick = () => openConversation(element.dataset.id));
   document.querySelectorAll('[data-quick]').forEach(button => button.onclick = () => useQuick(button.dataset.quick));
   if (conversation) bindConversation(conversation);
+  const copyProtocol = document.querySelector('#copyProtocol');
+  if (copyProtocol) copyProtocol.onclick = async () => {
+    try { await navigator.clipboard.writeText(conversation.protocol); copyProtocol.textContent = 'Copiado'; setTimeout(() => { if (copyProtocol.isConnected) copyProtocol.textContent = 'Copiar'; }, 1400); }
+    catch { prompt('Copie o protocolo:', conversation.protocol); }
+  };
 }
 
 function bindShell() {
@@ -243,6 +281,8 @@ async function useQuick(shortcut) {
 async function conversationAction(id, action, data = {}) {
   try {
     await api('/api/conversations/' + id + '/' + action, { method: 'POST', body: JSON.stringify(data) });
+    if (action === 'close') { inboxMode = 'closed'; protocolQuery = ''; }
+    if (action === 'assume') { inboxMode = 'mine'; protocolQuery = ''; }
     await boot();
     await openConversation(id);
   } catch (error) { alert(error.message); }
@@ -255,8 +295,8 @@ async function settings() {
   const agents = data.profiles.map(profile => '<li><b>' + esc(profile.name) + '</b> · ' + esc(profile.role) + ' · ' + esc(profile.status) + '</li>').join('');
   const queues = data.departments.map(department => '<li>' + esc(department.name) + ' <small class="muted">(' + esc(department.id) + ')</small></li>').join('');
   const replies = data.replies.map(reply => '<li><b>' + esc(reply.shortcut) + '</b> · ' + esc(reply.body) + '</li>').join('');
-  const managerForms = manager ? '<div class="settingsGrid"><form class="card" id="agentForm"><h3>Novo atendente</h3><label class="field">Nome<input name="name"></label><label class="field">E-mail<input name="email" type="email"></label><label class="field">Senha inicial<input name="password" type="password"></label><label class="field">Perfil<select name="role"><option value="agent">Atendente</option><option value="supervisor">Supervisor</option></select></label><button class="btn">Cadastrar atendente</button></form><form class="card" id="queueForm"><h3>Nova fila</h3><label class="field">Nome da fila<input name="name" placeholder="Instalação, reparo, dúvida ou financeiro"></label><button class="btn">Criar fila</button></form><form class="card" id="autoForm"><h3>Robô de atendimento</h3><label class="field">Mensagem inicial<textarea name="welcome_message">' + esc(data.settings?.welcome_message) + '</textarea></label><label class="field">Encaminhamento para fila<textarea name="fallback_message">' + esc(data.settings?.fallback_message) + '</textarea></label><label class="field">Tentativas antes de encaminhar<input name="max_attempts" type="number" min="1" max="5" value="' + esc(data.settings?.max_attempts || 2) + '"></label><button class="btn">Salvar robô</button></form><form class="card" id="quickForm"><h3>Mensagem rápida</h3><label class="field">Atalho<input name="shortcut" placeholder="/reparo"></label><label class="field">Mensagem<textarea name="body"></textarea></label><label class="field">Fila<select name="department_id"><option value="">Todas</option>' + data.departments.map(item => '<option value="' + esc(item.id) + '">' + esc(item.name) + '</option>').join('') + '</select></label><button class="btn">Adicionar resposta</button></form></div>' : '<p class="card">Seu perfil permite usar as filas e respostas. Um supervisor pode alterar cadastro de equipe, robô e automações.</p>';
-  const profileForm='<form class="card profileForm" id="profileForm"><h3>Meu nome no atendimento</h3><p class="muted">Esse nome aparece em negrito no topo das mensagens enviadas.</p><label class="field">Nome de exibição obrigatório<input name="display_name" required value="'+esc(state.profile.display_name||state.profile.name)+'"></label><label class="field">Telefone interno<input name="phone" value="'+esc(state.profile.phone||'')+'"></label><button class="btn">Salvar perfil</button></form>';
+  const managerForms = manager ? '<div class="settingsGrid"><form class="card" id="agentForm"><h3>Novo atendente</h3><label class="field">Nome do atendente (aparece nas mensagens)<input name="name" required minlength="2" maxlength="80"></label><label class="field">E-mail<input name="email" type="email" required></label><label class="field">Senha inicial<input name="password" type="password" required></label><label class="field">Perfil<select name="role"><option value="agent">Atendente</option><option value="supervisor">Supervisor</option></select></label><button class="btn">Cadastrar atendente</button></form><form class="card" id="queueForm"><h3>Nova fila</h3><label class="field">Nome da fila<input name="name" placeholder="Instalação, reparo, dúvida ou financeiro"></label><button class="btn">Criar fila</button></form><form class="card" id="autoForm"><h3>Robô de atendimento</h3><label class="field">Mensagem inicial<textarea name="welcome_message">' + esc(data.settings?.welcome_message) + '</textarea></label><label class="field">Encaminhamento para fila<textarea name="fallback_message">' + esc(data.settings?.fallback_message) + '</textarea></label><label class="field">Tentativas antes de encaminhar<input name="max_attempts" type="number" min="1" max="5" value="' + esc(data.settings?.max_attempts || 2) + '"></label><button class="btn">Salvar robô</button></form><form class="card" id="quickForm"><h3>Mensagem rápida</h3><label class="field">Atalho<input name="shortcut" placeholder="/reparo"></label><label class="field">Mensagem<textarea name="body"></textarea></label><label class="field">Fila<select name="department_id"><option value="">Todas</option>' + data.departments.map(item => '<option value="' + esc(item.id) + '">' + esc(item.name) + '</option>').join('') + '</select></label><button class="btn">Adicionar resposta</button></form></div>' : '<p class="card">Seu perfil permite usar as filas e respostas. Um supervisor pode alterar cadastro de equipe, robô e automações.</p>';
+  const profileForm='<form class="card profileForm" id="profileForm"><h3>Meu nome no atendimento</h3><p class="muted">Esse nome obrigatório aparece em negrito acima de todas as mensagens enviadas por você.</p><label class="field">Nome do atendente nas mensagens<input name="display_name" required minlength="2" maxlength="80" autocomplete="name" value="'+esc(state.profile.display_name||state.profile.name)+'"></label><label class="field">Telefone interno<input name="phone" value="'+esc(state.profile.phone||'')+'"></label><button class="btn">Salvar perfil</button></form>';
   app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Configurações de atendimento</h2><p class="muted">Filas, equipe, mensagens rápidas e regras do robô são separadas por empresa.</p></div><div><button class="btn subtle" id="back">Voltar à caixa</button>' + channelButton + '</div></div><div class="settingsGrid">'+profileForm+'</div>' + managerForms + '<div class="settingsGrid"><article class="card"><h3>Atendentes</h3><ul>' + agents + '</ul></article><article class="card"><h3>Filas configuradas</h3><ul>' + queues + '</ul></article><article class="card"><h3>Mensagens rápidas</h3><ul>' + replies + '</ul></article></div></section>', 'Configurações');
   bindShell();
   document.querySelector('#back').onclick = render;
