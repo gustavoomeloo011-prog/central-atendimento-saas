@@ -31,7 +31,7 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   if (!connectionString) throw new Error('DATABASE_URL é obrigatória para o estado Baileys.');
   const caInline = String(process.env.PGSSL_CA || '').trim();
   const caPath = String(process.env.PGSSL_ROOT_CERT || '').trim();
-  const ca = caInline ? caInline.replace(/\\n/g, '\n') : (caPath ? (await import('node:fs/promises')).readFile(caPath, 'utf8') : '');
+  const ca = caInline ? caInline.replace(/\\n/g, '\n') : (caPath ? await (await import('node:fs/promises')).readFile(caPath, 'utf8') : '');
   const ssl = ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: true };
   let poolConnectionString = connectionString;
   try {
@@ -79,7 +79,7 @@ export async function createSqlAuthState(connectionString = process.env.DATABASE
   const renewTimer = setInterval(() => query('select public.renew_connector_lease($1,$2,$3,60)', [companyId, connectorName, owner]).catch(()=>{}), 30_000);
   renewTimer.unref?.();
   async function flush() { await writeChain; }
-  async function close() { await flush(); clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); }
+  async function close() { try { await flush(); } finally { clearInterval(renewTimer); await query('select public.release_connector_lease($1,$2,$3)', [companyId, connectorName, owner]).catch(()=>{}); await pool.end(); } }
   async function deleteSession() {
     await flush();
     await query('begin');

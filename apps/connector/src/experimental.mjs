@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import { createPairingController } from './pairing.mjs';
 import { createSqlAuthState } from './sql-auth-state.mjs';
 import { randomUUID } from 'node:crypto';
+import { closeSocketSession } from './socket-cleanup.mjs';
 
 const port = Number(process.env.WHATSAPP_CONNECTOR_PORT || 3200);
 const sessionDirectory = process.env.WHATSAPP_SESSION_DIR || join(process.cwd(), 'apps', 'connector', 'sessions');
@@ -17,6 +18,7 @@ const companyId = String(process.env.WHATSAPP_COMPANY_ID || 'isp');
 const state = { status: 'DISCONNECTED', qr: null, phone: null, profileName: null, lastError: null, autoReplyEnabled: false, connectedAt: null, syncStatus: 'idle' };
 let socket = null;
 let starting = null;
+let stopping = null;
 let manualDisconnect = false;
 let pairingReadyWaiters = [];
 let authRegistered = false;
@@ -140,10 +142,23 @@ async function connect() {
   });
 }
 async function ensureConnected() {
+  if (stopping) await stopping;
   manualDisconnect = false;
   if (socket) return;
   if (!starting) starting = connect().finally(() => { starting = null; });
   await starting;
+}
+async function stopSession() {
+  if (stopping) return stopping;
+  stopping = (async () => {
+    manualDisconnect = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (starting) await starting;
+    const oldSocket = socket, oldAuth = authStateHandle;
+    socket = null; authStateHandle = null;
+    await closeSocketSession(oldSocket, oldAuth);
+  })();
+  try { await stopping; } finally { stopping = null; }
 }
 async function waitForPairingReady() {
   if (state.qr || state.status === 'CONNECTED') return;
@@ -231,18 +246,13 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/disconnect') {
     manualDisconnect = true; pairing.clear();
-    if (socket) { socket.end(undefined); socket = null; }
+    await stopSession();
     state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false;
     return json(response, 200, publicState());
   }
   if (request.method === 'POST' && url.pathname === '/api/whatsapp/logout-and-delete-session') {
     manualDisconnect = true; pairing.clear();
-    if (socket) { try { socket.end(undefined); } catch {} socket = null; }
-    if (authStateHandle) {
-      await authStateHandle.deleteSession?.();
-      await authStateHandle.close?.();
-    } else pairingResetRequested = true;
-    authStateHandle = null;
+    await stopSession();
     pairingResetRequested = process.env.BAILEYS_SQL_STATE === 'true';
     await rm(sessionDirectory, { recursive: true, force: true });
     authRegistered = false; state.status = 'DISCONNECTED'; state.qr = null; state.phone = null; state.profileName = null; state.autoReplyEnabled = false; state.lastError = null;
