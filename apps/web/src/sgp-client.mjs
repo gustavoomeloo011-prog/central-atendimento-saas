@@ -9,12 +9,13 @@ const numeric = value => value !== '' && value != null && Number.isFinite(Number
 const signal = value => { const n = numeric(value); return n !== null && n > -50 && n < 5 ? n : null; };
 export function customerSummary(customer) {
   const titles = Array.isArray(customer.titulos) ? customer.titulos : null;
+  const isOverdue = value => { const m=String(value||'').match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/); return m ? new Date(Number(m[3]),Number(m[2])-1,Number(m[1])) < new Date() : false; };
   const open = titles?.filter(t => t.status === 'aberto');
   return {
     id: customer.id, name: customer.nome || null, document: customer.cpfcnpj || null,
     invoices: open ? { count: open.length, overdue: open.filter(t => Number(t.diasAtraso) > 0).length,
       items: open.map(t => ({ id: t.id, contractId: t.clientecontrato_id, dueDate: t.dataVencimento,
-        amount: numeric(t.valorCorrigido ?? t.valor) })) } : null,
+        overdue: Number(t.diasAtraso)>0 || isOverdue(t.dataVencimento), amount: numeric(t.valorCorrigido ?? t.valor) })) } : null,
     contracts: (customer.contratos || []).map(c => ({ id: c.id, status: c.status,
       services: (c.servicos || []).map(s => ({ id: s.id, type: s.tipo, plan: s.plano?.descricao || null,
         online: null, rxDbm: signal(s.onu?.rx), txDbm: signal(s.onu?.tx),

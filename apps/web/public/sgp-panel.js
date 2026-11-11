@@ -10,6 +10,9 @@ export function renderSgp(data) {
   }
   const c = data.customer;
   const money = value => value == null ? 'Não informado' : Number(value).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+  const dueValue = value => { const match=String(value||'').match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/); return match ? new Date(Number(match[3]),Number(match[2])-1,Number(match[1])) : null; };
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()+30);
+  const financeItems = (c.invoices?.items||[]).filter(item => { const due=dueValue(item.dueDate); return item.overdue || (due && due <= cutoff); });
   const hasOnline=(c.contracts||[]).some(contract=>(contract.services||[]).some(service=>service.online===true));
   const hasOverdue=Number(c.invoices?.overdue||0)>0;
   return heading + '<div class="sgpBadges"><span class="statusChip open">Cliente identificado</span>' + (hasOnline?'<span class="statusChip online">ONU online</span>':'') + (hasOverdue?'<span class="statusChip waiting">Fatura pendente</span>':'') + '</div><section class="sgpSection"><h4>Cadastro</h4><dl class="clientData">' + field('Nome',c.name) + field('CPF/CNPJ',c.document) + field('ID cliente',c.id) + '</dl></section>' +
@@ -18,7 +21,7 @@ export function renderSgp(data) {
         field('Conexão',s.online === true ? '● Online' : s.online === false ? '● Offline' : 'Indisponível') +
         field('Sinal RX',s.rxDbm == null ? null : s.rxDbm + ' dBm') + field('Sinal TX',s.txDbm == null ? null : s.txDbm + ' dBm') : '') + '</dl>' +
       (s.rxDbm != null ? '<small>Último sinal armazenado no SGP; horário da medição não informado.</small>' : '')).join('') + '</section>').join('') +
-    '<section class="sgpSection financeSection"><h4>Financeiro</h4>' + (c.invoices ? '<p class="financeSummary"><b>' + esc(c.invoices.count) + '</b> fatura(s) em aberto · <b>' + esc(c.invoices.overdue) + '</b> vencida(s)</p><div class="invoiceList">' + c.invoices.items.slice(0,4).map(t =>
-      '<p><span>Contrato ' + esc(t.contractId) + '<small>' + esc(t.dueDate) + '</small></span><b>' + esc(money(t.amount)) + '</b></p>').join('') + '</div>' : '<p>Informação indisponível.</p>') + '</section>' +
+    '<section class="sgpSection financeSection"><h4>Financeiro</h4>' + (c.invoices ? '<p class="financeSummary"><b>' + esc(financeItems.length) + '</b> fatura(s) vencida(s) ou próximas de vencer</p><div class="invoiceList">' + financeItems.slice(0,8).map(t =>
+      '<p><span>Contrato ' + esc(t.contractId) + '<small>' + esc(t.dueDate) + '</small></span><b>' + esc(money(t.amount)) + '</b></p>').join('') + (financeItems.length?'':'<small>Nenhuma fatura vencida ou com vencimento nos próximos 30 dias.</small>') + '</div>' : '<p>Informação indisponível.</p>') + '</section>' +
     '<small class="sgpUpdated">Atualizado em ' + esc(new Date(data.checkedAt).toLocaleString('pt-BR')) + ' · cache de 60s</small>';
 }

@@ -4,6 +4,6 @@ export function inQueue(item, mode, profileId, now = Date.now()) {
     return item.status === 'closed' && Number.isFinite(closed) && now - closed < 86400000;
   }
   if (mode === 'mine') return item.status !== 'closed' && item.assigned_profile_id === profileId;
-  // Includes new and bot-operated conversations, not only those waiting for humans.
-  return item.status !== 'closed' && !item.assigned_profile_id;
+  if (mode === 'human') return item.status === 'waiting' && item.human_started_at && !item.assigned_profile_id;
+  return item.status !== 'closed' && !item.assigned_profile_id && !item.human_started_at;
 }

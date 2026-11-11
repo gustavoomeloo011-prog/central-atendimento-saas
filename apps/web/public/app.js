@@ -42,6 +42,7 @@ const timeOf = value => { const date = new Date(value); return Number.isNaN(date
 const initials = value => String(value || '?').trim().split(/\s+/).slice(0,2).map(part=>part[0]||'').join('').toUpperCase();
 const elapsed = value => { const date=new Date(value),seconds=Math.max(0,Math.floor((Date.now()-date)/1000)); if(Number.isNaN(date.valueOf()))return ''; if(seconds<60)return seconds+'s'; const minutes=Math.floor(seconds/60); if(minutes<60)return String(minutes).padStart(2,'0')+'m '+String(seconds%60).padStart(2,'0')+'s'; const hours=Math.floor(minutes/60); return String(hours).padStart(2,'0')+'h '+String(minutes%60).padStart(2,'0')+'m'; };
 const supervisor = () => ['supervisor', 'company_admin', 'superadmin'].includes(state.profile?.role);
+const queueTone = item => { const text=String(item.department_name||item.subject||'').toLowerCase(); return /financ|fatura|boleto/.test(text)?'tone-finance':/suporte|t[eé]cnic|reparo|sinal/.test(text)?'tone-support':/segunda|2ª|via/.test(text)?'tone-invoice':/venda|comercial|plano/.test(text)?'tone-sales':'tone-default'; };
 
 function login() {
   app.innerHTML = '<section class="login"><div class="brand"><span class="tag">ATENDIMENTO SG FIBRA</span><h1>Central de Atendimento</h1><p class="muted">Conversas, equipes, filas e automações em um só lugar.</p></div><form class="card" id="login"><h2>Entrar</h2><label class="field">Usuário ou e-mail<input name="email" type="text" autocomplete="username" required></label><label class="field">Senha<input name="password" type="password" autocomplete="current-password" required></label><button class="btn">Entrar</button><button type="button" class="btn subtle" id="recover">Esqueci minha senha</button></form></section>';
@@ -109,7 +110,7 @@ function shell(content, title = 'Caixa de entrada') {
 }
 
 function render() {
-  const list = [...(state.conversations || [])].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
+  const list = [...(state.conversations || [])].sort((a, b) => inboxMode === 'human' ? new Date(a.human_started_at || a.created_at || 0) - new Date(b.human_started_at || b.created_at || 0) : new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
   const isInInboxMode = item => inQueue(item,inboxMode,state.profile.id);
   const matchesProtocol = item => { const query=protocolQuery.trim().toUpperCase(); if(!query)return true; return [item.protocol,item.contact_name,item.contact_phone,item.department_name,item.subject,item.last_message].some(value=>String(value||'').toUpperCase().includes(query)); };
   const isVisibleInList = item => matchesProtocol(item) && (protocolQuery ? true : isInInboxMode(item));
@@ -129,8 +130,9 @@ function render() {
   const listToolbar = document.querySelector('.list .toolbar');
   if (listToolbar) {
     const modes = [
-      { id: 'general', symbol: 'Todos', label: 'Geral' },
-      { id: 'mine', symbol: 'Em atendimento', label: 'Meus atendimentos' },
+      { id: 'general', symbol: '🤖', label: 'Robô / Geral' },
+      { id: 'human', symbol: '🕒', label: 'Aguardando atendente' },
+      { id: 'mine', symbol: '👤', label: 'Meus atendimentos' },
       { id: 'closed', symbol: 'Encerrados', label: 'Encerrados' }
     ];
     const mode = document.createElement('div'); mode.className = 'inboxModes';
@@ -223,10 +225,13 @@ async function automationEditor() {
 }
 
 function bindConversation(conversation) {
+  if(!document.querySelector('#history')) { const header=document.querySelector('.protocolHeader'); if(header) header.insertAdjacentHTML('beforeend','<button class="linkButton" id="history">Histórico</button>'); }
   document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
   document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment]')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
   if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
   document.querySelector('#renameContact').onclick = async () => { const name=prompt('Nome do contato',conversation.contact_name); if(!name)return; const phone=prompt('DDD + número do WhatsApp',String(conversation.contact_phone||'').replace(/^55/,''));if(!phone)return;try{await api('/api/conversations/'+conversation.id+'/contact',{method:'PATCH',body:JSON.stringify({name,phone})});await boot();await openConversation(conversation.id);}catch(error){alert(error.message);} };
+  const historyButton=document.querySelector('#history');
+  if(historyButton) historyButton.onclick=async()=>{try{const result=await api('/api/conversations/'+conversation.id+'/history');const rows=(result.history||[]).map(item=>`${item.protocol||'Sem protocolo'} · ${attendanceLabel(item.status)} · ${item.department_name||'Sem fila'}\n${item.last_message||''}`).join('\n\n');alert(rows||'Nenhum atendimento anterior encontrado.');}catch(error){alert(error.message);}};
   document.querySelector('#internalNote').onclick = async () => { const body=prompt('Anotação interna (não será enviada ao cliente)');if(!body)return;try{await api('/api/conversations/'+conversation.id+'/internal-notes',{method:'POST',body:JSON.stringify({body})});await openConversation(conversation.id);}catch(error){alert(error.message);} };
   const attachmentInput=document.querySelector('#attachmentInput');
   document.querySelector('#attachButton').onclick=()=>attachmentInput.click();
@@ -283,10 +288,10 @@ async function useQuick(shortcut) {
 async function conversationAction(id, action, data = {}) {
   try {
     await api('/api/conversations/' + id + '/' + action, { method: 'POST', body: JSON.stringify(data) });
-    if (action === 'close') { inboxMode = 'closed'; protocolQuery = ''; }
+    if (action === 'close') { inboxMode = 'closed'; protocolQuery = ''; activeId = null; state.detail = null; }
     if (action === 'assume') { inboxMode = 'mine'; protocolQuery = ''; }
     await boot();
-    await openConversation(id);
+    if (action !== 'close') await openConversation(id);
   } catch (error) { alert(error.message); }
 }
 
