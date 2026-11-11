@@ -295,7 +295,7 @@ async function handle(request, response) {
     response.writeHead(200,{'content-type':message.attachment_type||'application/octet-stream','content-disposition':`inline; filename="${String(message.attachment_name||'arquivo').replace(/["\r\n]/g,'')}"`});
     return response.end(Buffer.from(await upstream.arrayBuffer()));
   }
-  if (url.pathname.startsWith('/api/whatsapp/')) return admin(session) ? proxyWhatsApp(request,response,company) : json(response,403,{error:'Somente supervisores podem gerenciar a conexão.'});
+  if (url.pathname.startsWith('/api/whatsapp/') && url.pathname !== '/api/whatsapp/transport') return admin(session) ? proxyWhatsApp(request,response,company) : json(response,403,{error:'Somente supervisores podem gerenciar a conexão.'});
   if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
     const [companyRow,conversations,departments,replies]=await Promise.all([
       db.one('select * from public.companies where id=$1',[company]),
