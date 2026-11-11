@@ -28,6 +28,15 @@ async function authRequest(path, method, payload, key = anonKey, bearer = key) {
   if (!response.ok) throw Object.assign(new Error(result.msg || result.error_description || result.message || 'Falha na autenticação.'), { status: response.status });
   return result;
 }
+async function sendBrevoRecovery(email, name, link) {
+  const apiKey=String(process.env.BREVO_API_KEY||'').trim();
+  if(!apiKey) return false;
+  const senderEmail=String(process.env.BREVO_SENDER_EMAIL||'').trim(), senderName=String(process.env.BREVO_SENDER_NAME||'SG FIBRA').trim();
+  if(!senderEmail) throw Object.assign(new Error('BREVO_SENDER_EMAIL não configurado.'),{status:503});
+  const response=await fetch('https://api.brevo.com/v3/smtp/email',{method:'POST',headers:{accept:'application/json','api-key':apiKey,'content-type':'application/json'},body:JSON.stringify({sender:{email:senderEmail,name:senderName},to:[{email,name:name||email}],subject:'SG FIBRA | Recuperação de acesso',htmlContent:`<div style="font-family:Arial;background:#f5f8fe;padding:32px"><div style="max-width:560px;margin:auto;background:#fff;padding:32px;border-radius:16px"><h1 style="color:#08172f">Recuperar acesso</h1><p>Olá, ${String(name||'').replace(/[<>&\"']/g,'')}!</p><p>Recebemos uma solicitação para redefinir a senha da sua conta na Central de Atendimento SG FIBRA.</p><p><a href="${link}" style="display:inline-block;background:#0866f5;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none">Redefinir minha senha</a></p><p>Este link é válido por 20 minutos e pode ser usado uma única vez.</p><p>Se você não solicitou essa alteração, ignore esta mensagem.</p></div></div>`})});
+  if(!response.ok) throw Object.assign(new Error('Não foi possível enviar o e-mail de recuperação.'),{status:502});
+  return true;
+}
 async function sessionFor(request) {
   const token = (request.headers.authorization || '').replace(/^Bearer /, '');
   if (!token) return null;
@@ -243,7 +252,7 @@ async function handle(request, response) {
     if (!profile) return json(response,403,{error:'Usuário não vinculado a uma empresa.'});
     return json(response,200,{token:auth.access_token,profile});
   }
-  if (request.method === 'POST' && url.pathname === '/api/recover-password') { const input=await body(request); await authRequest('recover','POST',{email:String(input.email||'').trim().toLowerCase()}); return json(response,200,{ok:true}); }
+  if (request.method === 'POST' && url.pathname === '/api/recover-password') { const input=await body(request),email=String(input.email||'').trim().toLowerCase(); if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return json(response,200,{ok:true,message:'Se existir uma conta vinculada a este e-mail, enviaremos as instruções para recuperação de acesso.'}); const profile=await db.one('select name,email,status from public.profiles where lower(email)=$1 and status not in (\'suspended\',\'revoked\') limit 1',[email]).catch(()=>null); try { if(profile&&process.env.BREVO_API_KEY){const linkData=await authRequest('admin/generate_link','POST',{type:'recovery',email},serviceKey,serviceKey); const link=String(linkData.action_link||linkData.properties?.action_link||''); if(link)await sendBrevoRecovery(email,profile.name,link); else await authRequest('recover','POST',{email});} else await authRequest('recover','POST',{email}); } catch(error) { console.error('[recovery] delivery failed',error.code||error.status||'unknown'); } return json(response,200,{ok:true,message:'Se existir uma conta vinculada a este e-mail, enviaremos as instruções para recuperação de acesso.'}); }
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/inbound') {
     if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
     const input=await body(request), company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''), phone=String(input.phone||'').replace(/\D/g,''), text=String(input.body||'').trim(),channelAddress=String(input.jid||'');
