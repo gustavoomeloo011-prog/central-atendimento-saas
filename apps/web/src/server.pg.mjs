@@ -318,6 +318,16 @@ async function handle(request, response) {
     return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies,robotEnabled:Boolean(robot?.enabled)});
   }
   if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company)]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,metaApiConfigured:metaApiConfigured()}); }
+  if (request.method === 'GET' && url.pathname === '/api/queue-monitor') {
+    const [conversations,departments,profiles]=await Promise.all([
+      db.query("select c.id,c.contact_name,c.contact_phone,c.status,c.assigned_profile_id,c.department_id,c.human_started_at,c.created_at,c.updated_at,c.priority,c.protocol,d.name department_name,p.name assignee_name,exists(select 1 from public.flow_runs fr where fr.company_id=c.company_id and fr.conversation_id=c.id and fr.status='active') robot_active from public.conversations c join public.departments d on d.id=c.department_id left join public.profiles p on p.id=c.assigned_profile_id where c.company_id=$1",[company]),
+      db.query('select id,name from public.departments where company_id=$1 order by name',[company]),
+      db.query("select p.id,p.name,p.status,p.last_seen_at,count(c.id)::int assigned_count from public.profiles p left join public.conversations c on c.assigned_profile_id=p.id and c.company_id=p.company_id and c.status<>'closed' where p.company_id=$1 group by p.id,p.name,p.status,p.last_seen_at order by p.name",[company])
+    ]);
+    const active=conversations.filter(c=>c.status!=='closed'), waiting=active.filter(c=>c.status==='waiting'&&!c.assigned_profile_id), robot=active.filter(c=>c.robot_active), human=active.filter(c=>c.assigned_profile_id), now=Date.now();
+    const queues=departments.map(d=>{const rows=active.filter(c=>c.department_id===d.id);const pending=rows.filter(c=>c.status==='waiting'&&!c.assigned_profile_id);const wait=pending.map(c=>Math.max(0,now-Date.parse(c.human_started_at||c.created_at))).filter(Number.isFinite);return {id:d.id,name:d.name,active:rows.length,waiting:pending.length,averageWaitMs:wait.length?Math.round(wait.reduce((a,b)=>a+b,0)/wait.length):0};});
+    return json(response,200,{stats:{active:active.length,waiting:waiting.length,robot:robot.length,human:human.length,averageWaitMs:waiting.length?Math.round(waiting.map(c=>now-Date.parse(c.human_started_at||c.created_at)).reduce((a,b)=>a+b,0)/waiting.length):0},queues,waiting,profiles});
+  }
   if(request.method==='PATCH'&&url.pathname==='/api/whatsapp/transport'){
     if(!admin(session))return json(response,403,{error:'Sem permissão.'});
     const input=await body(request),transport=String(input.transport||'');

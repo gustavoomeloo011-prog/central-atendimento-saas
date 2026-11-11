@@ -195,11 +195,14 @@ function bindShell() {
 async function openPanel(type) {
   const data = await api('/api/settings');
   if (type === 'queues') {
-    const cards = data.departments.map(department => {
-      const count = state.conversations.filter(item => item.department_id === department.id && item.status !== 'closed').length;
-      return '<article class="card"><span class="tag">FILA</span><h2>' + esc(department.name) + '</h2><p class="muted">' + count + ' atendimento(s) ativo(s)</p></article>';
-    }).join('');
-    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Filas de atendimento</h2><p class="muted">Organize instalação, reparo, dúvidas, financeiro e outras filas por empresa.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="settingsGrid">' + cards + '</div></section>', 'Filas');
+    const monitor=await api('/api/queue-monitor');
+    const fmt=ms=>{const s=Math.max(0,Math.floor(ms/1000));return String(Math.floor(s/60)).padStart(2,'0')+'m '+String(s%60).padStart(2,'0')+'s';};
+    const stat=(label,value,tone)=>'<article class="card queueStat '+tone+'"><span>'+label+'</span><h2>'+value+'</h2></article>';
+    const rows=monitor.queues.map(q=>'<tr><td><b>'+esc(q.name)+'</b></td><td>'+q.active+'</td><td>'+q.waiting+'</td><td>'+fmt(q.averageWaitMs)+'</td></tr>').join('');
+    const waiting=monitor.waiting.sort((a,b)=>Date.parse(a.human_started_at||a.created_at)-Date.parse(b.human_started_at||b.created_at)).slice(0,12).map(c=>'<article class="queueWaiting" data-open-conversation="'+esc(c.id)+'"><b>'+esc(c.contact_name)+'</b><span>'+esc(c.department_name)+' · '+(c.assignee_name||'Aguardando atendente')+'</span><time>'+fmt(Date.now()-Date.parse(c.human_started_at||c.created_at))+'</time></article>').join('')||'<p class="muted">Nenhum cliente aguardando.</p>';
+    const people=monitor.profiles.map(p=>'<li><b>'+esc(p.name)+'</b> · '+esc(p.status||'offline')+' · '+p.assigned_count+' atendimento(s)</li>').join('');
+    app.innerHTML=shell('<section class="queueDashboard"><div class="settingsHead"><div><h2>Filas em tempo real</h2><p class="muted">Monitoramento operacional da empresa. Atualize para acompanhar mudanças recentes.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="queueStats">'+stat('Conversas ativas',monitor.stats.active,'blue')+stat('Com robô',monitor.stats.robot,'purple')+stat('Aguardando humano',monitor.stats.waiting,'orange')+stat('Em atendimento',monitor.stats.human,'green')+stat('Espera média',fmt(monitor.stats.averageWaitMs),'blue')+'</div><div class="queueGrid"><article class="card"><h3>Filas</h3><table class="queueTable"><thead><tr><th>Fila</th><th>Ativos</th><th>Aguardando</th><th>Espera média</th></tr></thead><tbody>'+rows+'</tbody></table></article><aside class="card"><h3>Clientes aguardando</h3><div>'+waiting+'</div></aside><aside class="card"><h3>Atendentes</h3><ul>'+people+'</ul></aside></div></section>','Filas');
+    document.querySelectorAll('[data-open-conversation]').forEach(el=>el.onclick=()=>openConversation(el.dataset.openConversation));
   } else if (type === 'team') {
     const people = data.profiles.map(profile => '<article class="card"><h3>' + esc(profile.name) + '</h3><p class="muted">' + esc(profile.email) + '</p><span class="tag">' + esc(profile.role) + '</span> <span class="tag">' + esc(profile.status) + '</span></article>').join('');
     app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Equipe</h2><p class="muted">Atendentes individuais, status e permissões da empresa.</p></div><button class="btn" id="manageTeam">Gerenciar equipe</button></div><div class="settingsGrid">' + people + '</div></section>', 'Equipe');
