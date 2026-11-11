@@ -102,6 +102,8 @@ export function validateFlow(flow,{departments=[]}={}) {
   if(flow.nodes.some(n=>String(n.message||'').length>4000||String(n.title||'').length>120||(n.options||[]).length>20)) errors.push('Um bloco excede o limite de texto ou de opções.');
   const ids=new Set(flow.nodes.map(n=>n.id));
   if(ids.size!==flow.nodes.length) errors.push('Existem identificadores de blocos duplicados.');
+  const optionIds=new Set();
+  for(const option of flow.nodes.flatMap(n=>n.options||[])){if(typeof option.id!=='string'||!option.id)errors.push('Toda alternativa precisa de um identificador estável.');else if(optionIds.has(option.id))errors.push('Existem identificadores de alternativas duplicados.');else optionIds.add(option.id);}
   const starts=flow.nodes.filter(n=>n.type==='start'); if(starts.length!==1) errors.push('O fluxo precisa de exatamente um bloco Início.');
   const incoming=new Set(flow.edges.map(e=>e.target));
   for(const n of flow.nodes){
@@ -122,9 +124,10 @@ export function validateFlow(flow,{departments=[]}={}) {
   return [...new Set(errors)];
 }
 export function advanceFlow(flow, runtime, input=null, {maxSteps=40}={}) {
-  const state={nodeId:runtime?.nodeId||flow.nodes.find(n=>n.type==='start')?.id,steps:runtime?.steps||0,variables:{...(runtime?.variables||{})},waiting:false,finished:false,transfer:null,output:[],executed:[]};
+  const state={nodeId:runtime?.nodeId||flow.nodes.find(n=>n.type==='start')?.id,steps:runtime?.steps||0,variables:{...(runtime?.variables||{})},waiting:false,finished:false,transfer:null,output:[],executed:[],lastReply:null};
   for(let i=0;i<maxSteps;i++){
     const node=flow.nodes.find(n=>n.id===state.nodeId);if(!node){state.finished=true;break;}
+    if(input&&typeof input==='object'&&input.kind==='option'&&node.type!=='question'){state.output.push({type:'error',text:'A opção não pertence à pergunta atual.'});state.waiting=node.type==='wait';break;}
     state.executed.push(node.id);state.steps++;
     if(state.steps>200){state.finished=true;state.output.push({type:'error',text:'Limite de etapas atingido.'});break;}
     if(node.type==='end'){state.finished=true;break;}
@@ -137,10 +140,12 @@ export function advanceFlow(flow, runtime, input=null, {maxSteps=40}={}) {
       if(input===null){if(node.message)state.output.push({type:'message',text:renderTemplate(node.message,state.variables),nodeId:node.id,options:node.options||[]});state.waiting=true;break;}
       let port='next';
       if(node.type==='question'){
-        const normalized=String(input).trim().toLowerCase();const chosen=(node.options||[]).find((o,index)=>o.id===input||o.label.toLowerCase()===normalized||String(index+1)===normalized);
+        const selected=input&&typeof input==='object'&&input.kind==='option'?input:null;
+        const normalized=selected?'':String(input).trim().toLowerCase();const chosen=(node.options||[]).find((o,index)=>selected?(selected.nodeId===node.id&&selected.optionId===o.id):(o.id===input||o.label.toLowerCase()===normalized||String(index+1)===normalized));
         if(!chosen){state.output.push({type:'message',text:node.invalidReply||'Escolha uma das opções.',nodeId:node.id,options:node.options||[]});state.waiting=true;break;}
         port=chosen.id;
         state.variables.lastReply=String(chosen.label);
+        state.lastReply=String(chosen.label);
       }else state.variables.lastReply=String(input);
       input=null;state.nodeId=outgoing(flow,node.id,port);continue;
     }

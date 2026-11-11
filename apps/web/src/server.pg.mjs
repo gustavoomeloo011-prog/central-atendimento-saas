@@ -10,6 +10,7 @@ import { proxyWhatsApp } from './whatsapp-proxy.mjs';
 import { dispatchConnector, syncConnector } from './connector-bridge.mjs';
 import { validateFlow, newFlow, advanceFlow, sgFibraRobotFlow } from '../public/flow.js';
 import { startCloudConnector, stopCloudConnector } from './cloud-connector.mjs';
+import { buildMetaMessage, formatNumberedOptions, isInteractiveWindowExpired, parseMetaInbound } from './meta-interactive.mjs';
 
 const db = createPersistence();
 const sgp = createSgpClient();
@@ -56,11 +57,11 @@ const metaAccessToken = () => process.env.META_ACCESS_TOKEN || process.env.META_
 const metaPhoneNumberId = () => process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.WHATSAPP_NUMBER_ID || '';
 const metaApiVersion = () => String(process.env.META_GRAPH_API_VERSION || process.env.META_API_VERSION || '25.0').replace(/^v/i,'');
 const metaApiConfigured = () => Boolean(metaAccessToken() && metaPhoneNumberId() && /^\d+\.\d+$/.test(metaApiVersion()));
-async function metaSendText({phone,text,replyTo}) {
+async function metaSendMessage({phone,text,options=[],nodeId='',flowVersionId='',replyTo}) {
   const token=metaAccessToken(),phoneNumberId=metaPhoneNumberId(),version=metaApiVersion();
   if(!token||!phoneNumberId||!/^\d+\.\d+$/.test(version))throw Object.assign(new Error('Cloud API não configurada: confira o token, Phone Number ID e versão da Graph API no ambiente do Render.'),{status:503});
   if(!/^55\d{10,11}$/.test(String(phone||'')))throw Object.assign(new Error('A Cloud API exige o telefone do contato no formato internacional E.164.'),{status:409});
-  const body={messaging_product:'whatsapp',recipient_type:'individual',to:String(phone),type:'text',text:{preview_url:false,body:String(text||'')}};
+  const built=buildMetaMessage(phone,{text,options,nodeId,flowVersionId}),body=built.payload;
   if(replyTo)body.context={message_id:String(replyTo)};
   let response;
   try{response=await fetch(`https://graph.facebook.com/v${version}/${phoneNumberId}/messages`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20_000)});}
@@ -69,16 +70,17 @@ async function metaSendText({phone,text,replyTo}) {
   if(!response.ok)throw Object.assign(new Error(result.error?.error_user_msg||result.error?.message||'A Meta recusou o envio.'),{status:response.status,metaCode:result.error?.code||null});
   const messageId=String(result.messages?.[0]?.id||'');
   if(!messageId)throw Object.assign(new Error('A Meta não retornou um identificador de mensagem.'),{status:502,uncertain:true});
-  return {messageId,accepted:true};
+  return {messageId,accepted:true,mode:built.mode};
 }
-async function sendOnSelectedTransport(company,payload){
-  const transport=await selectedTransport(company);
+const metaSendText = payload => metaSendMessage(payload);
+async function sendOnTransport(transport,company,payload){
   if(transport==='meta'){
     if(payload.attachment?.data)throw Object.assign(new Error('Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'),{status:501});
-    return metaSendText({phone:payload.phone,text:payload.text,replyTo:payload.reply?.provider_message_id});
+    return metaSendMessage({phone:payload.phone,text:payload.text,replyTo:payload.reply?.provider_message_id});
   }
   return connectorSend(payload);
 }
+async function sendOnSelectedTransport(company,payload){return sendOnTransport(await selectedTransport(company),company,payload);}
 async function deliverMetaOutbox(outboxId){
   const item=await db.transaction(async tx=>{
     const row=await tx.one("select * from public.whatsapp_outbox where id=$1 and status='pending' for update skip locked",[outboxId]);
@@ -87,7 +89,9 @@ async function deliverMetaOutbox(outboxId){
   });
   if(!item)return;
   try{
-    const sent=await metaSendText({phone:item.to_phone,text:item.body});
+    const interactive=typeof item.interactive_payload==='string'?JSON.parse(item.interactive_payload||'{}'):(item.interactive_payload||{});
+    if(isInteractiveWindowExpired(interactive))throw Object.assign(new Error('A janela de atendimento da Meta expirou; não foi enviada mensagem interativa.'),{status:409});
+    const sent=await metaSendMessage({phone:item.to_phone,text:item.body,options:interactive.options||[],nodeId:interactive.nodeId||'',flowVersionId:interactive.flowVersionId||''});
     await db.transaction(async tx=>{
       await tx.query("update public.whatsapp_outbox set status='sent',provider_message_id=$1,last_error=null,updated_at=now() where id=$2",[sent.messageId,item.id]);
       await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId,item.company_id,item.idempotency_key.replace(/^meta-message:/,'')]);
@@ -128,8 +132,9 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   if(result.transfer)await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',updated_at=now() where company_id=$3 and id=$4",[result.transfer.departmentId,result.transfer.profileId,company,c.id]);
   const reachedEnd=result.executed.some(nodeId=>version.definition.nodes.some(node=>node.id===nodeId&&node.type==='end'));
   if(reachedEnd)await tx.query("update public.conversations set status='closed',closed_at=coalesce(closed_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
-  const reply=result.output.filter(item=>item.type==='message').map(item=>item.text+(item.options?.length?'\n'+item.options.map((option,index)=>`${index+1}. ${option.label}`).join('\n'):'' )).join('\n\n');
-  return {reply:reply||null,queued:Boolean(result.transfer)};
+  const outbound=result.output.filter(item=>item.type==='message').map(item=>({text:item.text,options:item.options||[],nodeId:item.nodeId||null,flowVersionId:run.version_id}));
+  const reply=outbound.map(item=>formatNumberedOptions(item.text,item.options)).join('\n\n');
+  return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer)};
 }
 
 async function handle(request, response) {
@@ -189,24 +194,29 @@ async function handle(request, response) {
           const claimed = await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,$4,$5,now()) on conflict (event_id) do nothing returning event_id', [`message:${providerId}`, company, 'meta.message', providerId, message]);
           if (!claimed) { duplicates++; continue; }
           const phone = String(message.from || '').replace(/\D/g, '');
-          const text = message.type === 'text' ? String(message.text?.body || '').trim() : `[Mensagem ${message.type || 'não suportada'}]`;
+          const inbound=parseMetaInbound(message);
+          const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
           let c = await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update", [company, phone]);
+          const provider=c?.transport||companyTransport;
+          if((!c&&companyTransport!=='meta')||(c&&provider!=='meta')){processed++;continue;}
           if (!c) {
             const department = await tx.one('select id from public.departments where company_id=$1 order by id limit 1', [company]);
             if (!department) continue;
             const id = randomUUID();
             const protocol = (await tx.one('select public.next_protocol($1) protocol', [company])).protocol;
-            c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7) returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
+            c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7,'meta') returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
           }
           await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
-          if(companyTransport==='meta'&&message.type==='text'&&!c.assigned_profile_id&&c.status!=='closed'){
-            const graphReply=await executePublishedFlow(tx,company,c,text,initialVariablesByProvider.get(providerId)||{});
-            if(graphReply?.reply){
-              const messageId=randomUUID(),outboxId=randomUUID();
-              await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,graphReply.reply]);
-              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body) values($1,$2,$3,$4,$5,$6) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,graphReply.reply]);
+          if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'){
+            const flowInput=inbound?.kind==='option'?inbound:(inbound?.value||text);
+            const graphReply=await executePublishedFlow(tx,company,c,flowInput,initialVariablesByProvider.get(providerId)||{});
+            const deliveries=graphReply?.outbound?.length?graphReply.outbound:(graphReply?.reply?[{text:graphReply.reply,options:[]}]:[]);
+            for(const delivery of deliveries){
+              const messageId=randomUUID(),outboxId=randomUUID(),historyBody=formatNumberedOptions(delivery.text,delivery.options),messageTimestamp=Number(message.timestamp),receivedAt=Number.isFinite(messageTimestamp)&&messageTimestamp>0?messageTimestamp*1000:Date.now(),interactive={options:delivery.options||[],nodeId:delivery.nodeId||'',flowVersionId:delivery.flowVersionId||'',windowExpiresAt:new Date(receivedAt+24*60*60*1000).toISOString()};
+              await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,historyBody]);
+              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body,interactive_payload) values($1,$2,$3,$4,$5,$6,$7) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,String(delivery.text||''),interactive]);
             }
           }
           processed++;
@@ -238,15 +248,17 @@ async function handle(request, response) {
     if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'});
     const input=await body(request), company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''), phone=String(input.phone||'').replace(/\D/g,''), text=String(input.body||'').trim(),channelAddress=String(input.jid||'');
   if (!company || company !== process.env.WHATSAPP_COMPANY_ID || !phone || !text) return json(response,400,{error:'Empresa, telefone e mensagem são obrigatórios.'});
-    if(await selectedTransport(company)==='meta')return json(response,202,{ok:true,ignored:true,reason:'A Cloud API está selecionada para esta empresa.'});
+    const defaultTransport=await selectedTransport(company);
     const inboundProviderId=String(input.message_id||'')||null;
     if(inboundProviderId){const duplicate=await db.one('select conversation_id from public.messages where provider_message_id=$1',[inboundProviderId]);if(duplicate)return json(response,200,{ok:true,conversation_id:duplicate.conversation_id,reply:null,duplicate:true});}
     // Look up SGP only when this conversation is about to start a robot run.
     // The adapter caches and coalesces requests; no SGP credentials/data leave the backend.
     const [activeFlow,existingRun]=await Promise.all([
       db.one("select id from public.automation_flows where company_id=$1 and status='published' limit 1",[company]),
-      db.one("select c.id,c.assigned_profile_id,fr.status as run_status from public.conversations c left join public.flow_runs fr on fr.company_id=c.company_id and fr.conversation_id=c.id where c.company_id=$1 and (c.channel_address=$2 or c.contact_phone=$3) and c.status<>'closed' order by c.updated_at desc limit 1",[company,channelAddress||null,phone])
+      db.one("select c.id,c.transport,c.assigned_profile_id,fr.status as run_status from public.conversations c left join public.flow_runs fr on fr.company_id=c.company_id and fr.conversation_id=c.id where c.company_id=$1 and (c.channel_address=$2 or c.contact_phone=$3) and c.status<>'closed' order by c.updated_at desc limit 1",[company,channelAddress||null,phone])
     ]);
+    const conversationTransport=existingRun?.transport||defaultTransport;
+    if((existingRun&&conversationTransport!=='baileys')||(!existingRun&&defaultTransport!=='baileys'))return json(response,202,{ok:true,ignored:true,reason:'A conversa está vinculada a outro provedor WhatsApp.'});
     const shouldLookup=Boolean(activeFlow&&!existingRun?.assigned_profile_id&&!existingRun?.run_status);
     const sgpResult=shouldLookup?await sgp.lookup(company,phone):{status:'not_checked'};
     const sgpServices=(sgpResult.status==='found'?sgpResult.customer?.contracts||[]:[]).flatMap(contract=>contract.services||[]);
@@ -264,9 +276,11 @@ async function handle(request, response) {
     };
     const result=await db.transaction(async tx => {
       let c=await tx.one("select * from public.conversations where company_id=$1 and (channel_address=$2 or contact_phone=$3) and status<>'closed' order by updated_at desc limit 1 for update",[company,channelAddress||null,phone]);
+      if(c&&(c.transport||defaultTransport)!=='baileys')return {conversation_id:c.id,protocol:c.protocol,reply:null,duplicate:false,ignored:true};
+      if (!c&&defaultTransport!=='baileys')return {conversation_id:null,reply:null,duplicate:false,ignored:true};
       if (!c) { const d=await tx.one('select id from public.departments where company_id=$1 order by id limit 1',[company]); if (!d) throw Object.assign(new Error('Empresa sem fila.'),{status:409});
         const id=randomUUID(), protocol=(await tx.one('select public.next_protocol($1) protocol',[company])).protocol;
-        c=await tx.one('insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *',[id,company,d.id,input.name||phone,phone,channelAddress||null,'WhatsApp','waiting','normal',d.id,protocol]); }
+        c=await tx.one('insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,\'baileys\') returning *',[id,company,d.id,input.name||phone,phone,channelAddress||null,'WhatsApp','waiting','normal',d.id,protocol]); }
       else if(channelAddress&&!c.channel_address){c=await tx.one('update public.conversations set channel_address=$1,contact_phone=case when length($2) between 10 and 15 then $2 else contact_phone end,updated_at=now() where company_id=$3 and id=$4 returning *',[channelAddress,phone,company,c.id]);}
       const providerId=inboundProviderId;
       if (providerId && await tx.one('select id from public.messages where provider_message_id=$1',[providerId])) return {conversation_id:c.id,protocol:c.protocol,reply:null,duplicate:true};
@@ -382,8 +396,9 @@ async function handle(request, response) {
   if(request.method==='POST'&&url.pathname==='/api/conversations'){
     const input=await body(request),raw=String(input.phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw,name=String(input.name||'').trim()||phone;
     if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});
+    const transport=await selectedTransport(company);
     let created=await db.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1",[company,phone]);
-    if(!created){const department=await db.one('select id from public.departments where company_id=$1 order by name limit 1',[company]);if(!department)return json(response,409,{error:'Cadastre uma fila antes de iniciar conversas.'});const id=randomUUID(),protocol=(await db.one('select public.next_protocol($1) protocol',[company])).protocol;created=await db.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol) values($1,$2,$3,$4,$5,$6,'WhatsApp','open','normal',$3,$7) returning *",[id,company,department.id,name.slice(0,120),phone,phone+'@s.whatsapp.net',protocol]);}
+    if(!created){const department=await db.one('select id from public.departments where company_id=$1 order by name limit 1',[company]);if(!department)return json(response,409,{error:'Cadastre uma fila antes de iniciar conversas.'});const id=randomUUID(),protocol=(await db.one('select public.next_protocol($1) protocol',[company])).protocol;created=await db.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport) values($1,$2,$3,$4,$5,$6,'WhatsApp','open','normal',$3,$7,$8) returning *",[id,company,department.id,name.slice(0,120),phone,phone+'@s.whatsapp.net',protocol,transport]);}
     return json(response,201,{conversation:created});
   }
   if (pieces[0]!=='api'||pieces[1]!=='conversations'||!pieces[2]) return json(response,404,{error:'Rota não encontrada.'});
@@ -392,7 +407,7 @@ async function handle(request, response) {
   if(request.method==='GET'&&pieces.length===4&&pieces[3]==='sgp'){ response.setHeader('Cache-Control','no-store'); return json(response,200,await sgp.lookup(company,selected.contact_phone)); }
   const action=pieces[3],input=await body(request);
   if(request.method==='POST'&&action==='messages'&&String(session.profile.display_name||'').trim().length<2)return json(response,409,{error:'Antes de enviar, configure seu nome de atendente em Configurações → Meu nome no atendimento.'});
-  if (request.method==='POST'&&action==='messages') { const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const transport=await selectedTransport(company); if(transport==='meta'&&attachment?.data)return json(response,501,{error:'Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'}); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,text,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',closed_at=null,assigned_profile_id=$1,channel_address=$4,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company,channelAddress||selected.contact_phone+'@s.whatsapp.net']);}); try{const sent=await sendOnSelectedTransport(company,{phone:selected.contact_phone,jid:channelAddress,text,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent',transport});}catch(error){await db.query("update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4",[error.uncertain?'unknown':'failed',String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
+  if (request.method==='POST'&&action==='messages') { const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const transport=selected.transport||await selectedTransport(company); if(transport==='meta'&&attachment?.data)return json(response,501,{error:'Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'}); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,text,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',closed_at=null,assigned_profile_id=$1,channel_address=$4,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company,channelAddress||selected.contact_phone+'@s.whatsapp.net']);}); try{const sent=await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:channelAddress,text,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent',transport});}catch(error){await db.query("update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4",[error.uncertain?'unknown':'failed',String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
   if(request.method==='POST'&&action==='internal-notes'){const text=String(input.body||'').trim();if(!text)return json(response,400,{error:'Escreva a anotação interna.'});const noteId=randomUUID();await db.transaction(async tx=>{await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'internal','internal')",[noteId,company,id,session.profile.id,text]);await tx.query('insert into public.internal_notes(id,company_id,conversation_id,profile_id,body) values($1,$2,$3,$4,$5)',[noteId,company,id,session.profile.id,text]);await audit(tx,session,'internal_note_created',id);});return json(response,201,{ok:true});}
   if(request.method==='PATCH'&&action==='contact'){const name=String(input.name||'').trim(),raw=String(input.phone||selected.contact_phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw;if(!name)return json(response,400,{error:'Informe o nome do contato.'});if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});await db.query('update public.conversations set contact_name=$1,contact_phone=$2,channel_address=$3,updated_at=now() where company_id=$4 and id=$5',[name.slice(0,120),phone,phone+'@s.whatsapp.net',company,id]);return json(response,200,{ok:true});}
   if (request.method==='POST'&&action==='simulate') { const text=String(input.body||'').trim(); if (!text) return json(response,400,{error:'Escreva a mensagem simulada.'}); await db.transaction(async tx=>{ const c=await tx.one('select * from public.conversations where id=$1 and company_id=$2 for update',[id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,text,'inbound']); if (c.assigned_profile_id) return; const graphReply=await executePublishedFlow(tx,company,c,text); if(graphReply){if(graphReply.reply)await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,graphReply.reply,'outbound']);return;} const settings=await tx.one('select * from public.automation_settings where company_id=$1',[company]); if (!settings) return; const attempts=c.bot_attempts+1,financial=/financeiro|fatura|segunda via|boleto/i.test(text),queued=financial||attempts>=settings.max_attempts; const target=financial?await tx.one("select id from public.departments where company_id=$1 and name ilike '%financeiro%' limit 1",[company]):null; await tx.query('update public.conversations set department_id=$1,status=$2,bot_attempts=$3,updated_at=now() where id=$4 and company_id=$5',[target?.id||c.department_id,queued?'waiting':'open',attempts,id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,queued?settings.fallback_message:settings.welcome_message,'outbound']); await audit(tx,session,queued?'bot_queued':'bot_replied',id); }); return json(response,201,{ok:true}); }
