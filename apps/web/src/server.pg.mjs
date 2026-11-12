@@ -548,7 +548,7 @@ async function handle(request, response) {
     try{
       if(action==='assume')await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
       if(action==='close')await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento respondendo com 1, 2 ou 3 estrelas.');
-    }catch(error){return json(response,502,{ok:false,error:'Atendimento atualizado, mas não foi possível enviar a mensagem automática.'});}
+    }catch(error){return json(response,200,{ok:true,warning:'Atendimento encerrado, mas a mensagem automática não pôde ser enviada agora.'});}
     return json(response,200,{ok:true});
   }
   return json(response,404,{error:'Ação não encontrada.'});
