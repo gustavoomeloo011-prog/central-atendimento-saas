@@ -11,6 +11,9 @@ let menuClosed = localStorage.getItem('central_menu_closed') === null ? matchMed
 let inboxMode = 'general';
 let protocolQuery = '';
 let mobilePane = 'list';
+let whatsappView = 0;
+let whatsappTimer = null;
+function leaveWhatsApp() { whatsappView++; clearTimeout(whatsappTimer); }
 let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
@@ -45,6 +48,7 @@ const supervisor = () => ['supervisor', 'company_admin', 'superadmin'].includes(
 const queueTone = item => { const text=String(item.department_name||item.subject||'').toLowerCase(); return /financ|fatura|boleto/.test(text)?'tone-finance':/suporte|t[eé]cnic|reparo|sinal/.test(text)?'tone-support':/segunda|2ª|via/.test(text)?'tone-invoice':/venda|comercial|plano/.test(text)?'tone-sales':'tone-default'; };
 
 function login() {
+  leaveWhatsApp();
   app.innerHTML = '<section class="login"><div class="brand"><span class="tag">ATENDIMENTO SG FIBRA</span><h1>Central de Atendimento</h1><p class="muted">Conversas, equipes, filas e automações em um só lugar.</p></div><form class="card" id="login"><h2>Entrar</h2><label class="field">Usuário ou e-mail<input name="email" type="text" autocomplete="username" required></label><label class="field">Senha<input name="password" type="password" autocomplete="current-password" required></label><button class="btn">Entrar</button><button type="button" class="btn subtle" id="recover">Esqueci minha senha</button></form></section>';
   document.querySelector('#recover').onclick = () => { app.innerHTML='<section class="login"><div class="brand"><span class="tag">ATENDIMENTO SG FIBRA</span><h1>Recuperar acesso</h1><p class="muted">Informe o e-mail cadastrado para receber um link de recuperação.</p></div><form class="card" id="recovery"><label class="field">E-mail cadastrado<input name="email" type="email" autocomplete="email" required></label><button class="btn">Enviar link</button><button type="button" class="btn subtle" id="backLogin">Voltar ao login</button><p class="muted" id="recoveryMessage"></p></form></section>'; document.querySelector('#backLogin').onclick=login; document.querySelector('#recovery').onsubmit=async event=>{event.preventDefault();const email=new FormData(event.target).get('email');try{const result=await api('/api/recover-password',{method:'POST',body:JSON.stringify({email})});document.querySelector('#recoveryMessage').textContent=result.message||'Se existir uma conta vinculada a este e-mail, enviaremos as instruções para recuperação de acesso.';event.target.querySelector('button').disabled=true;}catch(error){document.querySelector('#recoveryMessage').textContent='Não foi possível processar a solicitação agora.';}}; };
   document.querySelector('#login').onsubmit = async event => {
@@ -111,6 +115,7 @@ function shell(content, title = 'Caixa de entrada') {
 }
 
 function render() {
+  leaveWhatsApp();
   const list = [...(state.conversations || [])].sort((a, b) => inboxMode === 'human' ? new Date(a.human_started_at || a.created_at || 0) - new Date(b.human_started_at || b.created_at || 0) : new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
   const isInInboxMode = item => inQueue(item,inboxMode,state.profile.id);
   const matchesProtocol = item => { const query=protocolQuery.trim().toUpperCase(); if(!query)return true; return [item.protocol,item.contact_name,item.contact_phone,item.department_name,item.subject,item.last_message].some(value=>String(value||'').toUpperCase().includes(query)); };
@@ -193,6 +198,7 @@ function bindShell() {
 }
 
 async function openPanel(type) {
+  leaveWhatsApp();
   const data = await api('/api/settings');
   if (type === 'queues') {
     const monitor=await api('/api/queue-monitor');
@@ -225,6 +231,7 @@ async function openPanel(type) {
 }
 
 async function automationEditor() {
+  leaveWhatsApp();
   return showFlowEditor({app,api,shell,bindShell,esc,back:()=>openPanel('automations')});
 }
 
@@ -300,6 +307,7 @@ async function conversationAction(id, action, data = {}) {
 }
 
 async function settings() {
+  leaveWhatsApp();
   const data = await api('/api/settings');
   const manager = supervisor();
   const channelButton = manager ? '<button class="btn" id="whatsapp">WhatsApp Experimental</button>' : '';
@@ -332,8 +340,12 @@ async function submit(event, path, after, method='POST') {
 }
 
 async function whatsapp() {
+  const view = ++whatsappView;
+  clearTimeout(whatsappTimer);
+  const refresh = () => { if (view === whatsappView) whatsapp(); };
   const getStatus = () => api('/api/whatsapp/status');
   const draw = status => {
+    if (view !== whatsappView) return;
     const connected = status.status === 'CONNECTED';
     const pair = status.pairing || {};
     const code = pair.code && !pair.expired ? pair.code : null;
@@ -345,23 +357,23 @@ async function whatsapp() {
     app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>WhatsApp Experimental</h2><p class="muted">Conector Baileys no Render para testes controlados.</p></div><button class="btn subtle" id="back">Voltar</button></div><div class="card whatsappCard">' + monitors + '<p aria-live="polite"><b>' + esc(label) + '</b></p><p><b>Número conectado:</b> ' + esc(status.phone || 'aguardando') + '</p><p><b>Robô:</b> '+(status.autoReplyEnabled?'Ativo':'Pausado')+'</p>' + (status.lastError ? '<p class="muted">' + esc(status.lastError) + '</p>' : '') + '<div class="pairTabs"><button class="btn ' + (whatsappMode === 'qr' ? '' : 'subtle') + '" id="showQr">QR Code</button><button class="btn ' + (whatsappMode === 'pair' ? '' : 'subtle') + '" id="showPair">Código de pareamento</button></div>' + (whatsappMode === 'qr' ? qr + '<button class="btn" id="connect">Conectar por QR Code</button>' : pairingView) + '<div class="pairTabs"><button class="btn" id="toggleRobot">'+(status.autoReplyEnabled?'Pausar robô':'Ativar robô')+'</button><button class="btn subtle" id="disconnect">Desconectar</button><button class="btn subtle" id="deleteSession">Encerrar e apagar sessão</button></div><hr><h3>Números autorizados</h3><form id="allow"><input name="number" type="tel" placeholder="+55 (11) 9XXXX-XXXX"><button class="btn">Autorizar número</button></form><p><b>Autorizados:</b> ' + esc(status.allowedCount) + '</p><button class="btn emergency" id="stop">Desativar todas as respostas automáticas</button></div></section>', 'WhatsApp Experimental');
     bindShell();
     document.querySelector('#back').onclick = settings;
-    document.querySelector('#showQr').onclick = () => { whatsappMode = 'qr'; whatsapp(); };
-    document.querySelector('#showPair').onclick = () => { whatsappMode = 'pair'; whatsapp(); };
-    if (whatsappMode === 'qr') document.querySelector('#connect').onclick = async () => { document.querySelector('#connect').disabled = true; try { await api('/api/whatsapp/connect', { method: 'POST' }); whatsapp(); } catch (error) { alert(error.message); whatsapp(); } };
+    document.querySelector('#showQr').onclick = () => { whatsappMode = 'qr'; refresh(); };
+    document.querySelector('#showPair').onclick = () => { whatsappMode = 'pair'; refresh(); };
+    if (whatsappMode === 'qr') document.querySelector('#connect').onclick = async () => { document.querySelector('#connect').disabled = true; try { await api('/api/whatsapp/connect', { method: 'POST' }); refresh(); } catch (error) { alert(error.message); refresh(); } };
     if (whatsappMode === 'pair') {
-      document.querySelector('#pairForm').onsubmit = async event => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { await api('/api/whatsapp/pairing-code', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); } catch (error) { alert(error.message); button.disabled = false; whatsapp(); } };
+      document.querySelector('#pairForm').onsubmit = async event => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { await api('/api/whatsapp/pairing-code', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); refresh(); } catch (error) { alert(error.message); button.disabled = false; refresh(); } };
       if (code) document.querySelector('#copyPair').onclick = () => navigator.clipboard.writeText(code).then(() => alert('Código copiado.')).catch(() => alert('Não foi possível copiar. Selecione o código na tela.'));
     }
-    document.querySelector('#disconnect').onclick = async () => { if (confirm('Desconectar este WhatsApp?')) { await api('/api/whatsapp/disconnect', { method: 'POST' }); whatsapp(); } };
-    document.querySelector('#toggleRobot').onclick=async()=>{await api('/api/whatsapp/auto-reply',{method:'POST',body:JSON.stringify({enabled:!status.autoReplyEnabled})});whatsapp();};
-    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Encerrar a conexão e apagar a sessão salva para permitir um novo pareamento?')) { try { await api('/api/whatsapp/logout-and-delete-session', { method: 'POST' }); const pending = await api('/api/whatsapp/connect', { method: 'POST' }); draw(pending); } catch (error) { alert(error.message); whatsapp(); } } };
-    document.querySelector('#stop').onclick = async () => { await api('/api/whatsapp/emergency-stop', { method: 'POST' }); whatsapp(); };
+    document.querySelector('#disconnect').onclick = async () => { if (confirm('Desconectar este WhatsApp?')) { await api('/api/whatsapp/disconnect', { method: 'POST' }); refresh(); } };
+    document.querySelector('#toggleRobot').onclick=async()=>{await api('/api/whatsapp/auto-reply',{method:'POST',body:JSON.stringify({enabled:!status.autoReplyEnabled})});refresh();};
+    document.querySelector('#deleteSession').onclick = async () => { if (confirm('Encerrar a conexão e apagar a sessão salva para permitir um novo pareamento?')) { try { await api('/api/whatsapp/logout-and-delete-session', { method: 'POST' }); const pending = await api('/api/whatsapp/connect', { method: 'POST' }); draw(pending); } catch (error) { alert(error.message); refresh(); } } };
+    document.querySelector('#stop').onclick = async () => { await api('/api/whatsapp/emergency-stop', { method: 'POST' }); refresh(); };
     const numberInput = document.querySelector('#allow [name=number]');
     numberInput.oninput = () => { numberInput.value = formatPhone(numberInput.value); };
-    document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await api('/api/whatsapp/authorize', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); whatsapp(); };
-    if (['QR_PENDING','CONNECTING','RECONNECTING','PAIRING_REQUESTED','PAIRING_CODE'].includes(status.status)) setTimeout(() => { if (document.querySelector('#pairForm') || document.querySelector('#connect')) whatsapp(); }, 1500);
+    document.querySelector('#allow').onsubmit = async event => { event.preventDefault(); await api('/api/whatsapp/authorize', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); refresh(); };
+    if (['QR_PENDING','CONNECTING','RECONNECTING','PAIRING_REQUESTED','PAIRING_CODE'].includes(status.status)) whatsappTimer = setTimeout(() => { if (view === whatsappView && !document.activeElement?.matches('input')) refresh(); }, 1500);
   };
-  try { draw(await getStatus()); } catch (error) { app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">Não foi possível consultar o conector no servidor. ' + esc(error.message) + '</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
+  try { draw(await getStatus()); } catch (error) { if (view !== whatsappView) return; app.innerHTML = shell('<section class="settings"><h2>WhatsApp Experimental</h2><p class="card">Não foi possível consultar o conector no servidor. ' + esc(error.message) + '</p><button class="btn subtle" id="back">Voltar</button></section>', 'WhatsApp Experimental'); bindShell(); document.querySelector('#back').onclick = settings; }
 }
 
 token ? boot() : login();
