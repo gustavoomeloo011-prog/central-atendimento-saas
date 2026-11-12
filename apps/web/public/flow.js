@@ -69,7 +69,7 @@ export function sgFibraRobotFlow({supportDepartmentId='',financeDepartmentId='',
 
   const support=add('question','Suporte técnico','Qual problema você está enfrentando?',['Internet lenta','Sem conexão','Outro problema']);
   edge(clientMenu,clientMenu.options[0].id,support);edge(unknownClientMenu,unknownClientMenu.options[0].id,support);
-  const restart=add('message','Reiniciar modem','Vamos tentar um procedimento rápido: desligue o modem da tomada, aguarde 30 segundos e ligue novamente. Espere as luzes estabilizarem.');
+  const restart=add('message','Reiniciar modem','Vamos tentar um procedimento rápido: desligue o modem da tomada, aguarde 2 minutos e ligue novamente. Espere as luzes estabilizarem.');
   edge(support,support.options[0].id,restart);
   const check=add('question','Confirmar conexão','A conexão voltou ao normal?',['Sim','Não']);next(restart,check);
   finish(check,'Conexão restabelecida','Que bom! Se a lentidão voltar, pode chamar a gente novamente.',check.options[0].id);

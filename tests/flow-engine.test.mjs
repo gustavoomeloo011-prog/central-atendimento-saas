@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { advanceFlow, validateFlow, exampleFlow } from '../apps/web/public/flow.js';
+import { advanceFlow, validateFlow, exampleFlow, sgFibraRobotFlow } from '../apps/web/public/flow.js';
 
 const graph={
   nodes:[
@@ -63,4 +63,11 @@ test('modelo visual da imagem percorre cliente, suporte e sem sinal',()=>{
   assert.equal(state.output[0].text,'Qual é o problema?');
   state=advanceFlow(flow,state,'Sem sinal');
   assert.equal(state.finished,true);
+});
+
+test('fluxo SG Fibra orienta aguardar dois minutos ao reiniciar o modem',()=>{
+  const flow=sgFibraRobotFlow();
+  const restart=flow.nodes.find(node=>node.title==='Reiniciar modem');
+  assert.match(restart.message,/aguarde 2 minutos/);
+  assert.doesNotMatch(restart.message,/30 segundos/);
 });

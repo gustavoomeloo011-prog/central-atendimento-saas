@@ -60,14 +60,20 @@ export function buildMetaMessage(to, { text, options = [], nodeId = '', flowVers
   }
 
   let reason = '';
+  let useList = items.length >= 4;
   if (items.some(item => !item.id || !item.label || codePointLength(item.id) > 256)) reason = 'Cada alternativa precisa de identificador e rótulo válidos.';
   else if (items.some(item => codePointLength(encodeFlowOptionRef(nodeId, item.id)) > 256)) reason = 'O identificador da alternativa excede o limite aceito pela Meta.';
   else if (codePointLength(bodyText) > 1024) reason = 'O texto da pergunta excede o limite de uma mensagem interativa.';
   else if (items.length > 10) reason = 'A Meta aceita até 10 alternativas em uma lista; divida o menu em submenus.';
-  else if (items.length <= 3 && items.some(item => codePointLength(item.label) > 20)) reason = 'O título de botão excede 20 caracteres.';
-  else if (items.length >= 4 && items.some(item => codePointLength(item.label) > 24)) reason = 'O título de uma opção da lista excede 24 caracteres.';
+  else if (items.some(item => codePointLength(item.label) > 72)) reason = 'O texto de uma alternativa excede 72 caracteres.';
 
-  if (!reason && items.length <= 3) {
+  // Button labels have a 20-character cap. Keep longer customer-facing labels
+  // clickable by sending a list row with a short title and the complete label
+  // as its description (Meta allows up to 72 characters there).
+  if (!reason && items.length <= 3 && items.some(item => codePointLength(item.label) > 20)) useList = true;
+  if (!reason && items.some(item => codePointLength(item.label) > 24)) useList = true;
+
+  if (!reason && !useList) {
     return {
       mode: 'buttons',
       payload: {
@@ -92,7 +98,11 @@ export function buildMetaMessage(to, { text, options = [], nodeId = '', flowVers
           body: { text: bodyText },
           action: {
             button: 'Ver opções',
-            sections: [{ title: 'Opções', rows: items.map(item => ({ id: encodeFlowOptionRef(nodeId, item.id), title: item.label })) }],
+            sections: [{ title: 'Opções', rows: items.map((item,index) => ({
+              id: encodeFlowOptionRef(nodeId, item.id),
+              title: codePointLength(item.label) <= 24 ? item.label : `Opção ${index + 1}`,
+              ...(codePointLength(item.label) > 24 ? { description: item.label } : {}),
+            })) }],
           },
         },
       },

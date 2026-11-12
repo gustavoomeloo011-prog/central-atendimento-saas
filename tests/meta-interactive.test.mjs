@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildMetaMessage, decodeFlowOptionRef, encodeFlowOptionRef, parseMetaInbound, formatNumberedOptions, isInteractiveWindowExpired } from '../apps/web/src/meta-interactive.mjs';
-import { advanceFlow } from '../apps/web/public/flow.js';
+import { advanceFlow, sgFibraRobotFlow } from '../apps/web/public/flow.js';
 
 const options = count => Array.from({length:count},(_,index)=>({id:`option-${index+1}`,label:`Opção ${index+1}`}));
 
@@ -30,10 +30,36 @@ test('mais de dez alternativas usa fallback numérico completo, sem truncar',()=
   assert.match(message.payload.text.body,/11\. Opção 11/);
 });
 
-test('rótulo de botão longo não é cortado e usa fallback textual',()=>{
+test('rótulo longo continua clicável em lista e preserva o texto completo',()=>{
   const message=buildMetaMessage('5511999990000',{text:'Menu',options:[{id:'long',label:'Solicitar liberação de sinal'}],nodeId:'menu',flowVersionId:'v1'});
+  assert.equal(message.mode,'list');
+  assert.equal(message.payload.interactive.type,'list');
+  assert.equal(message.payload.interactive.action.sections[0].rows[0].title,'Opção 1');
+  assert.equal(message.payload.interactive.action.sections[0].rows[0].description,'Solicitar liberação de sinal');
+  assert.deepEqual(decodeFlowOptionRef(message.payload.interactive.action.sections[0].rows[0].id),{kind:'option',nodeId:'menu',optionId:'long'});
+});
+
+test('opção longa em lista mantém rótulo integral na descrição',()=>{
+  const message=buildMetaMessage('5511999990000',{text:'Como posso ajudar?',options:[{id:'invoice',label:'Solicitar segunda via da fatura vencida'}],nodeId:'finance',flowVersionId:'v1'});
+  const row=message.payload.interactive.action.sections[0].rows[0];
+  assert.equal(message.mode,'list');
+  assert.equal(row.description,'Solicitar segunda via da fatura vencida');
+});
+
+test('todas as perguntas do fluxo SG Fibra usam opções clicáveis compatíveis',()=>{
+  const flow=sgFibraRobotFlow({supportDepartmentId:'support',financeDepartmentId:'finance',salesDepartmentId:'sales'});
+  for(const node of flow.nodes.filter(item=>item.type==='question')){
+    const built=buildMetaMessage('5511999990000',{text:node.message,options:node.options,nodeId:node.id,flowVersionId:'v1'});
+    assert.ok(['buttons','list'].includes(built.mode),`${node.title} caiu para texto numerado`);
+    assert.ok(['button','list'].includes(built.payload.interactive.type));
+  }
+});
+
+test('rótulo maior que o limite de descrição usa fallback sem truncar',()=>{
+  const label='x'.repeat(73);
+  const message=buildMetaMessage('5511999990000',{text:'Menu',options:[{id:'long',label}],nodeId:'menu',flowVersionId:'v1'});
   assert.equal(message.mode,'text-fallback');
-  assert.match(message.payload.text.body,/Solicitar liberação de sinal/);
+  assert.match(message.payload.text.body,new RegExp(label));
 });
 
 test('respostas de botão, lista e template viram identificadores internos',()=>{
