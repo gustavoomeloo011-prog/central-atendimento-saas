@@ -106,7 +106,7 @@ async function refreshLive() {
 setInterval(() => {
   if (currentView !== 'inbox') return;
   document.querySelectorAll('[data-clock-start]').forEach(clock => { clock.textContent=elapsed(clock.dataset.clockStart); });
-}, 15000);
+}, 1000);
 
 function messageHtml(message) {
   const internal = message.direction === 'internal';
@@ -289,7 +289,7 @@ async function automationEditor() {
 
 function bindConversation(conversation) {
   const oldToggle=document.querySelector('#toggleClientPanel');
-  if(oldToggle){ const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } oldToggle.remove(); }
+  if(oldToggle){ const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(clientPanelOpen){ oldToggle.remove(); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } } else { oldToggle.textContent='▣ Mostrar dados'; oldToggle.title='Mostrar dados do cliente'; oldToggle.style.display='inline-flex'; oldToggle.onclick=()=>{clientPanelOpen=true;localStorage.setItem('central_client_panel','1');render();}; } }
   document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
   document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment]')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
   if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
