@@ -82,12 +82,14 @@ async function metaSendMessage({phone,text,options=[],nodeId='',flowVersionId=''
   return {messageId,accepted:true,mode:built.mode};
 }
 const metaSendText = payload => metaSendMessage(payload);
+let currentAgentName = '';
 async function sendOnTransport(transport,company,payload){
+  const outgoingText=currentAgentName&&payload.text?`Atendente ${currentAgentName}:\n\n${String(payload.text).replace(/^[^:\n]{1,120}:\s*\n\s*\n/,'')}`:payload.text;
   if(transport==='meta'){
     if(payload.attachment?.data)throw Object.assign(new Error('Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'),{status:501});
-    return metaSendMessage({phone:payload.phone,text:payload.text,replyTo:payload.reply?.provider_message_id});
+    return metaSendMessage({phone:payload.phone,text:outgoingText,replyTo:payload.reply?.provider_message_id});
   }
-  return connectorSend(payload);
+  return connectorSend({...payload,text:outgoingText});
 }
 async function sendOnSelectedTransport(company,payload){return sendOnTransport(await selectedTransport(company),company,payload);}
 async function deliverMetaOutbox(outboxId){
@@ -339,6 +341,7 @@ async function handle(request, response) {
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/outbound') { if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'}); const input=await body(request); const company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''); if (company!==process.env.WHATSAPP_COMPANY_ID) return json(response,403,{error:'Empresa não autorizada.'}); const c=await conversation(company,String(input.conversation_id||'')); if (!c) return json(response,404,{error:'Conversa não encontrada.'}); const provider=String(input.message_id||'')||null; const existing=provider&&await db.one('select id from public.messages where provider_message_id=$1',[provider]); if (existing) return json(response,200,{ok:true,message_id:existing.id,delivery:'sent'}); const id=randomUUID(); await db.query('insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id) values($1,$2,$3,$4,$5,$6)',[id,company,c.id,String(input.body||''),'outbound',provider]); return json(response,201,{ok:true,message_id:id,delivery:'sent'}); }
   if(request.method==='POST'&&url.pathname==='/api/internal/whatsapp/delivery'){if(!validConnector(request))return json(response,401,{error:'Conector não autorizado.'});const input=await body(request),company=String(input.company_id||'');if(company!==process.env.WHATSAPP_COMPANY_ID)return json(response,403,{error:'Empresa não autorizada.'});const status=['sent','delivered','read'].includes(input.status)?input.status:'sent';await db.query('update public.messages set delivery_status=$1 where company_id=$2 and provider_message_id=$3',[status,company,String(input.message_id||'')]);return json(response,200,{ok:true});}
   const session=await sessionFor(request); if (!session) return json(response,401,{error:'Sessão expirada.'});
+  currentAgentName=(request.method==='POST'&&/\/api\/conversations\/[^/]+\/messages$/.test(url.pathname))?String(session.profile.display_name||session.profile.name||'Atendente').trim():'';
   const company=session.profile.company_id, pieces=url.pathname.split('/').filter(Boolean);
   if(request.method==='GET'&&pieces[0]==='api'&&pieces[1]==='attachments'&&pieces[2]){
     const message=await db.one('select attachment_path,attachment_type,attachment_name from public.messages where company_id=$1 and id=$2',[company,pieces[2]]);
