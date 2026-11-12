@@ -130,7 +130,14 @@ async function storeAttachment(company,conversationId,messageId,attachment) {
 async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   if(c.assigned_profile_id)return null;
   let run=await tx.one('select * from public.flow_runs where company_id=$1 and conversation_id=$2 for update',[company,c.id]);
-  if(run?.status!=='active'&&run)return {reply:null,queued:false};
+  if(run?.status!=='active'&&run){
+    if(c.status==='waiting'){
+      const ahead=await tx.one("select count(*)::int count from public.conversations where company_id=$1 and status='waiting' and assigned_profile_id is null and id<>$2 and coalesce(human_started_at,created_at)<coalesce($3,now())",[company,c.id,c.human_started_at]);
+      const count=Math.max(0,Number(ahead?.count||0));
+      return {reply:`Aguarde seu atendente. Você tem ${count} pessoa(s) na sua frente.`,outbound:[{text:`Aguarde seu atendente. Você tem ${count} pessoa(s) na sua frente.`,options:[]}],queued:true};
+    }
+    return {reply:null,queued:false};
+  }
   if(!run){
     const version=await tx.one("select f.id flow_id,v.id version_id from public.automation_flows f join public.automation_flow_versions v on v.flow_id=f.id and v.version=f.published_version where f.company_id=$1 and f.status='published' order by f.updated_at desc limit 1",[company]);
     if(!version)return null;
@@ -143,9 +150,42 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   if(result.transfer)await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$3 and id=$4",[result.transfer.departmentId,result.transfer.profileId,company,c.id]);
   const reachedEnd=result.executed.some(nodeId=>version.definition.nodes.some(node=>node.id===nodeId&&node.type==='end'));
   if(reachedEnd)await tx.query("update public.conversations set status='waiting',assigned_profile_id=null,closed_at=null,human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+  const invoiceRequested=/segunda\s*via|fatura|boleto/i.test(String(result.lastReply||''));
+  if(invoiceRequested){
+    const sgpResult=await sgp.lookup(company,c.contact_phone);
+    const items=(sgpResult.customer?.invoices?.items||[]).filter(item=>item?.id&&item?.dueDate).sort((a,b)=>String(a.dueDate).localeCompare(String(b.dueDate))).slice(-2);
+    const invoiceLines=[];
+    for(const item of items){
+      try{const doc=await sgp.invoice(company,item.id);invoiceLines.push(`Fatura com vencimento em ${item.dueDate}:\n${doc.barcode?`Código de barras: ${doc.barcode}\n`:''}Boleto: ${doc.link}`);}catch{invoiceLines.push(`Fatura com vencimento em ${item.dueDate}: ${new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(item.id),process.env.SGP_BASE_URL).toString()}`);}
+    }
+    const text=invoiceLines.length?`Segue sua 2ª via:\n\n${invoiceLines.join('\n\n')}`:'Não localizei faturas vencidas ou próximas do vencimento no SGP.';
+    result.output.push({type:'message',text,options:[]});
+    await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+    result.transfer=null; result.finished=true;
+  }
+  if(result.transfer||reachedEnd){
+    const ahead=await tx.one("select count(*)::int count from public.conversations where company_id=$1 and status='waiting' and assigned_profile_id is null and id<>$2 and coalesce(human_started_at,created_at)<now()",[company,c.id]);
+    const count=Math.max(0,Number(ahead?.count||0));
+    result.output.push({type:'message',text:`Seu atendimento foi encaminhado para a fila. Há ${count} pessoa(s) na sua frente.`,options:[]});
+  }
   const outbound=result.output.filter(item=>item.type==='message').map(item=>({text:item.text,options:item.options||[],nodeId:item.nodeId||null,flowVersionId:run.version_id}));
   const reply=outbound.map(item=>formatNumberedOptions(item.text,item.options)).join('\n\n');
   return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer||reachedEnd)};
+}
+async function sendConversationNotice(company, selected, session, text){
+  const messageId=randomUUID();
+  const agentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
+  currentAgentName=agentName;
+  const bodyText=`Atendente ${agentName}:\n\n${text}`;
+  await db.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'outbound','pending')",[messageId,company,selected.id,session.profile.id,bodyText]);
+  try{
+    const sent=await sendOnTransport(selected.transport||await selectedTransport(company),company,{phone:selected.contact_phone,jid:selected.channel_address,text,correlation_id:messageId});
+    await db.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);
+  }catch(error){
+    await db.query("update public.messages set delivery_status='failed',error_message=$1 where company_id=$2 and id=$3",[String(error.message||'Falha no envio').slice(0,500),company,messageId]);
+    throw error;
+  }
+  return messageId;
 }
 
 async function handle(request, response) {
@@ -208,6 +248,10 @@ async function handle(request, response) {
           const inbound=parseMetaInbound(message);
           const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
+          if(/^[1-3]$/.test(String(text).trim())){
+            const rated=await tx.one("select c.id,c.protocol,c.closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]);
+            if(rated){await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(String(text).trim())]);processed++;continue;}
+          }
           let c = await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update", [company, phone]);
           const provider=c?.transport||companyTransport;
           if((!c&&companyTransport!=='meta')||(c&&provider!=='meta')){processed++;continue;}
@@ -292,6 +336,10 @@ async function handle(request, response) {
     const defaultTransport=await selectedTransport(company);
     const inboundProviderId=String(input.message_id||'')||null;
     if(inboundProviderId){const duplicate=await db.one('select conversation_id from public.messages where provider_message_id=$1',[inboundProviderId]);if(duplicate)return json(response,200,{ok:true,conversation_id:duplicate.conversation_id,reply:null,duplicate:true});}
+    if(/^[1-3]$/.test(text)){
+      const rated=await db.one("select c.id,c.protocol,c.contact_phone,c.channel_address,c.transport,c.closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]).catch(()=>null);
+      if(rated){await db.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars,comment) values($1,$2,$3,$4,$5,$6,$7) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(text),null]);try{await sendOnTransport(rated.transport||defaultTransport,company,{phone:rated.contact_phone,jid:rated.channel_address,text:'Obrigado pela avaliação! Sua nota foi registrada.'});}catch{}return json(response,201,{ok:true,rating:Number(text),conversation_id:rated.id});}
+    }
     // Look up SGP only when this conversation is about to start a robot run.
     // The adapter caches and coalesces requests; no SGP credentials/data leave the backend.
     const [activeFlow,existingRun]=await Promise.all([
@@ -359,7 +407,7 @@ async function handle(request, response) {
       db.query('select * from public.departments where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),db.one("select exists(select 1 from public.automation_flows where company_id=$1 and status='published') enabled",[company])]);
     return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies,robotEnabled:Boolean(robot?.enabled)});
   }
-  if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company)]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,metaApiConfigured:metaApiConfigured()}); }
+  if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport,ratingStats]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company),db.query("select p.id,p.name,count(r.id)::int rated_count,coalesce(sum(r.stars),0)::int stars_total,coalesce(round(avg(r.stars),2),0)::numeric average_stars from public.profiles p left join public.conversation_ratings r on r.company_id=$1 and r.profile_id=p.id where p.company_id=$1 group by p.id,p.name order by p.name",[company]).catch(()=>[]) ]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,ratingStats,metaApiConfigured:metaApiConfigured()}); }
   if (request.method === 'GET' && url.pathname === '/api/queue-monitor') {
     const [conversations,departments,profiles]=await Promise.all([
       db.query("select c.id,c.contact_name,c.contact_phone,c.status,c.assigned_profile_id,c.department_id,c.human_started_at,c.created_at,c.updated_at,c.priority,c.protocol,d.name department_name,p.name assignee_name,exists(select 1 from public.flow_runs fr where fr.company_id=c.company_id and fr.conversation_id=c.id and fr.status='active') robot_active from public.conversations c join public.departments d on d.id=c.department_id left join public.profiles p on p.id=c.assigned_profile_id where c.company_id=$1",[company]),
@@ -478,7 +526,28 @@ async function handle(request, response) {
   if(request.method==='POST'&&action==='internal-notes'){const text=String(input.body||'').trim();if(!text)return json(response,400,{error:'Escreva a anotação interna.'});const noteId=randomUUID();await db.transaction(async tx=>{await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'internal','internal')",[noteId,company,id,session.profile.id,text]);await tx.query('insert into public.internal_notes(id,company_id,conversation_id,profile_id,body) values($1,$2,$3,$4,$5)',[noteId,company,id,session.profile.id,text]);await audit(tx,session,'internal_note_created',id);});return json(response,201,{ok:true});}
   if(request.method==='PATCH'&&action==='contact'){const name=String(input.name||'').trim(),raw=String(input.phone||selected.contact_phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw;if(!name)return json(response,400,{error:'Informe o nome do contato.'});if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});await db.query('update public.conversations set contact_name=$1,contact_phone=$2,channel_address=$3,updated_at=now() where company_id=$4 and id=$5',[name.slice(0,120),phone,phone+'@s.whatsapp.net',company,id]);return json(response,200,{ok:true});}
   if (request.method==='POST'&&action==='simulate') { const text=String(input.body||'').trim(); if (!text) return json(response,400,{error:'Escreva a mensagem simulada.'}); await db.transaction(async tx=>{ const c=await tx.one('select * from public.conversations where id=$1 and company_id=$2 for update',[id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,text,'inbound']); if (c.assigned_profile_id) return; const graphReply=await executePublishedFlow(tx,company,c,text); if(graphReply){if(graphReply.reply)await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,graphReply.reply,'outbound']);return;} const settings=await tx.one('select * from public.automation_settings where company_id=$1',[company]); if (!settings) return; const attempts=c.bot_attempts+1,financial=/financeiro|fatura|segunda via|boleto/i.test(text),queued=financial||attempts>=settings.max_attempts; const target=financial?await tx.one("select id from public.departments where company_id=$1 and name ilike '%financeiro%' limit 1",[company]):null; await tx.query("update public.conversations set department_id=$1,status=$2,bot_attempts=$3,human_started_at=case when $2='waiting' then coalesce(human_started_at,now()) else human_started_at end,updated_at=now() where id=$4 and company_id=$5",[target?.id||c.department_id,queued?'waiting':'open',attempts,id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,queued?settings.fallback_message:settings.welcome_message,'outbound']); await audit(tx,session,queued?'bot_queued':'bot_replied',id); }); return json(response,201,{ok:true}); }
-  if (request.method==='POST'&&['assume','close','transfer'].includes(action)) { const result=await db.transaction(async tx=>{ const c=await tx.one('select * from public.conversations where company_id=$1 and id=$2 for update',[company,id]); if(action==='assume'||action==='close')await tx.query('update public.flow_runs set status=$1,updated_at=now() where company_id=$2 and conversation_id=$3',[action==='close'?'finished':'paused',company,id]); if (action==='assume') await tx.query("update public.conversations set assigned_profile_id=$1,status='open',closed_at=null,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company]); if (action==='close') await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where id=$1 and company_id=$2",[id,company]); if (action==='transfer') { const d=await tx.one('select id from public.departments where id=$1 and company_id=$2',[input.department_id,company]); if (!d) return {error:'Setor inválido.'}; const assignee=input.assigned_profile_id?await tx.one('select id from public.profiles where id=$1 and company_id=$2',[input.assigned_profile_id,company]):null; await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where id=$3 and company_id=$4",[d.id,assignee?.id||null,id,company]); } await audit(tx,session,action==='assume'?'conversation_assumed':action==='close'?'conversation_closed':'conversation_transferred',id); return {ok:true}; }); return json(response,result.error?400:200,result); }
+  if (request.method==='POST'&&['assume','close','transfer'].includes(action)) {
+    const result=await db.transaction(async tx=>{
+      const c=await tx.one('select * from public.conversations where company_id=$1 and id=$2 for update',[company,id]);
+      if(action==='assume'||action==='close')await tx.query('update public.flow_runs set status=$1,updated_at=now() where company_id=$2 and conversation_id=$3',[action==='close'?'finished':'paused',company,id]);
+      if(action==='assume')await tx.query("update public.conversations set assigned_profile_id=$1,status='open',closed_at=null,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company]);
+      if(action==='close')await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_by_profile_id=$3,closed_at=now(),updated_at=now() where id=$1 and company_id=$2",[id,company,session.profile.id]);
+      if(action==='transfer'){
+        const d=await tx.one('select id from public.departments where id=$1 and company_id=$2',[input.department_id,company]);
+        if(!d)return {error:'Setor inválido.'};
+        const assignee=input.assigned_profile_id?await tx.one('select id from public.profiles where id=$1 and company_id=$2',[input.assigned_profile_id,company]):null;
+        await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where id=$3 and company_id=$4",[d.id,assignee?.id||null,id,company]);
+      }
+      await audit(tx,session,action==='assume'?'conversation_assumed':action==='close'?'conversation_closed':'conversation_transferred',id);
+      return {ok:true,conversation:c};
+    });
+    if(result.error)return json(response,400,result);
+    try{
+      if(action==='assume')await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
+      if(action==='close')await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento respondendo com 1, 2 ou 3 estrelas.');
+    }catch(error){return json(response,502,{ok:false,error:'Atendimento atualizado, mas não foi possível enviar a mensagem automática.'});}
+    return json(response,200,{ok:true});
+  }
   return json(response,404,{error:'Ação não encontrada.'});
 }
 const server=createServer((req,res)=>{ handle(req,res).catch(error=>{ console.error('Request failed:',error.message); if (!res.headersSent) { const status=error.status||500; json(res,status,{error:(status>=400&&status<500)||status===503?error.message:'Falha na consulta.'}); } }); });
