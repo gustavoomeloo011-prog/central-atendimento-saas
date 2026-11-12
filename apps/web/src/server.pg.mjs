@@ -172,14 +172,17 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   const reply=outbound.map(item=>formatNumberedOptions(item.text,item.options)).join('\n\n');
   return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer||reachedEnd)};
 }
-async function sendConversationNotice(company, selected, session, text){
+async function sendConversationNotice(company, selected, session, text, options=[]){
   const messageId=randomUUID();
   const agentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
   currentAgentName=agentName;
   const bodyText=`Atendente ${agentName}:\n\n${text}`;
   await db.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'outbound','pending')",[messageId,company,selected.id,session.profile.id,bodyText]);
   try{
-    const sent=await sendOnTransport(selected.transport||await selectedTransport(company),company,{phone:selected.contact_phone,jid:selected.channel_address,text,correlation_id:messageId});
+    const transport=selected.transport||await selectedTransport(company);
+    const sent=transport==='meta'
+      ? await metaSendMessage({phone:selected.contact_phone,text:bodyText,options,nodeId:'rating',flowVersionId:'system'})
+      : await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:selected.channel_address,text,correlation_id:messageId});
     await db.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);
   }catch(error){
     await db.query("update public.messages set delivery_status='failed',error_message=$1 where company_id=$2 and id=$3",[String(error.message||'Falha no envio').slice(0,500),company,messageId]);
@@ -248,9 +251,10 @@ async function handle(request, response) {
           const inbound=parseMetaInbound(message);
           const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
-          if(/^[1-3]$/.test(String(text).trim())){
+          const ratingValue=/^rating_[1-3]$/.test(String(inbound?.optionId||''))?Number(String(inbound.optionId).slice(-1)):Number(String(text).trim());
+          if(Number.isInteger(ratingValue)&&ratingValue>=1&&ratingValue<=3){
             const rated=await tx.one("select c.id,c.protocol,null::text as closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]);
-            if(rated){try{await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(String(text).trim())]);}catch(error){if(error.code!=='42703')throw error;await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,protocol,stars) values($1,$2,$3,$4,$5) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.protocol,Number(String(text).trim())]);}processed++;continue;}
+            if(rated){try{await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,ratingValue]);}catch(error){if(error.code!=='42703')throw error;await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,protocol,stars) values($1,$2,$3,$4,$5) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.protocol,ratingValue]);}processed++;continue;}
           }
           let c = await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update", [company, phone]);
           const provider=c?.transport||companyTransport;
@@ -547,7 +551,7 @@ async function handle(request, response) {
     if(result.error)return json(response,400,result);
     try{
       if(action==='assume')await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
-      if(action==='close')await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento respondendo com 1, 2 ou 3 estrelas.');
+      if(action==='close')await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento:',[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]);
     }catch(error){return json(response,200,{ok:true,warning:'Atendimento encerrado, mas a mensagem automática não pôde ser enviada agora.'});}
     return json(response,200,{ok:true});
   }
