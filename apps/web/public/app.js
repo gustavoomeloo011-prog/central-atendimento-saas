@@ -117,7 +117,8 @@ setInterval(() => {
 function messageHtml(message) {
   const internal = message.direction === 'internal';
   const robot = !internal && message.direction === 'outbound' && /autom[aá]tico|rob[oô]/i.test(message.author_name || '');
-  const attachment = message.attachment_path ? '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>' : '';
+  const mediaUrl=message.attachment_path?'/api/attachments/'+encodeURIComponent(message.id):'';
+  const attachment = message.attachment_path ? (String(message.attachment_type||'').startsWith('image/') ? '<img class="messageMedia" src="'+mediaUrl+'" alt="'+esc(message.attachment_name||'Imagem recebida')+'" loading="lazy">' : String(message.attachment_type||'').startsWith('audio/') ? '<audio class="messageMedia" controls preload="metadata" src="'+mediaUrl+'"></audio>' : String(message.attachment_type||'').startsWith('video/') ? '<video class="messageMedia" controls preload="metadata" src="'+mediaUrl+'"></video>' : '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>') : '';
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
   const author = internal ? 'Nota interna' : robot ? 'Robô SG Fibra' : message.direction === 'inbound' ? 'Cliente' : (message.author_name || 'Atendente');
