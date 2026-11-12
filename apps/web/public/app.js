@@ -116,7 +116,8 @@ function messageHtml(message) {
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
   const author = internal ? 'Nota interna' : robot ? 'Robô SG Fibra' : message.direction === 'inbound' ? 'Cliente' : (message.author_name || 'Atendente');
-  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : 'inbound ') + (robot ? 'robot ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + (robot ? '<span class="authorIcon">🤖</span>' : internal ? '<span class="authorIcon">▣</span>' : '') + esc(author) + '</b>' + reply + '<div>' + esc(message.body) + '</div>' + attachment + (message.delivery_status==='failed'?'<p class="sendFailure" role="status">Não enviada: '+esc(message.error_message||'Falha no envio')+'</p>':'') + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
+  const cleanBody=message.direction==='outbound'&&!robot?String(message.body||'').replace(/^[^:\n]{1,120}:\s*\n\s*\n/,''):String(message.body||'');
+  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : 'inbound ') + (robot ? 'robot ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + (robot ? '<span class="authorIcon">🤖</span>' : internal ? '<span class="authorIcon">▣</span>' : '') + esc(author) + '</b>' + reply + '<div>' + esc(cleanBody) + '</div>' + attachment + (message.delivery_status==='failed'?'<p class="sendFailure" role="status">Não enviada: '+esc(message.error_message||'Falha no envio')+'</p>':'') + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
 }
 
 async function showConversationHistory(conversation) {
@@ -149,6 +150,10 @@ async function openConversation(id) {
   void loadSgp(id);
   mobilePane = 'chat';
   render();
+}
+
+function showNewConversationCard(){
+  const overlay=document.createElement('div'); overlay.className='historyOverlay'; overlay.innerHTML='<section class="historyDialog newConversationCard"><header class="historyHead"><div><h2>Chamar cliente</h2><small>Inicie um novo atendimento pelo WhatsApp</small></div><button class="btn subtle" id="cancelNewConversation">Fechar</button></header><form class="historyBody" id="newConversationForm"><label class="field">Número do WhatsApp<input name="phone" type="tel" placeholder="DDD + número (ex.: 11999999999)" required></label><label class="field">Nome do cliente (opcional)<input name="name" maxlength="120" placeholder="Ex.: Maria Silva"></label><label class="field">Mensagem inicial<textarea name="message" rows="4" placeholder="Digite a mensagem que será enviada"></textarea></label><button class="btn" type="submit">Criar atendimento e enviar</button></form></section>'; app.appendChild(overlay); overlay.querySelector('#cancelNewConversation').onclick=()=>overlay.remove(); overlay.querySelector('form').onsubmit=async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.target));const button=event.submitter;button.disabled=true;try{const result=await api('/api/conversations',{method:'POST',body:JSON.stringify({phone:values.phone,name:values.name})});overlay.remove();await boot();await openConversation(result.conversation.id);if(values.message?.trim()){const conversation=result.conversation;await api('/api/conversations/'+conversation.id+'/messages',{method:'POST',body:JSON.stringify({body:values.message.trim(),agent_label:state.profile.display_name||state.profile.name})});await openConversation(conversation.id);}}catch(error){button.disabled=false;alert(error.message);}};
 }
 
 function shell(content, title = 'Caixa de entrada') {
@@ -204,7 +209,7 @@ function render() {
         requestAnimationFrame(()=>{render(); queueSwitchBusy=false;});
       };
     });
-    mode.querySelector('#newConversation').onclick=async()=>{const phone=prompt('DDD + número do WhatsApp (ex.: 11999999999)');if(!phone)return;const name=prompt('Nome do contato (opcional)')||'';try{const result=await api('/api/conversations',{method:'POST',body:JSON.stringify({phone,name})});await boot();await openConversation(result.conversation.id);}catch(error){alert(error.message);}};
+    mode.querySelector('#newConversation').onclick=()=>showNewConversationCard();
     listToolbar.prepend(mode);
   }
   bindShell();
