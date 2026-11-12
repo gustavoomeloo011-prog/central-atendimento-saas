@@ -190,7 +190,7 @@ function render() {
       { id: 'general', symbol: '🤖', label: 'Robô / Geral' },
       { id: 'human', symbol: '🕒', label: 'Aguardando atendente' },
       { id: 'mine', symbol: '👤', label: 'Meus atendimentos' },
-      { id: 'closed', symbol: 'Encerrados', label: 'Encerrados' }
+      { id: 'closed', symbol: '✅', label: 'Encerrados' }
     ].filter(item => state.robotEnabled || item.id !== 'general');
     const mode = document.createElement('div'); mode.className = 'inboxModes';
     mode.innerHTML = modes.map(item => { const count=list.filter(row=>inQueue(row,item.id,state.profile.id)).length; return '<button class="btn queueMode ' + (inboxMode === item.id ? '' : 'subtle') + '" type="button" data-inbox-mode="' + item.id + '" aria-label="' + item.label + ', ' + count + ' conversas" title="' + item.label + ' ('+count+')">' + item.symbol + '<span class="queueCount">' + count + '</span></button>'; }).join('') + '<button class="iconButton" id="newConversation" type="button" aria-label="Nova conversa" title="Nova conversa">＋</button>';
@@ -247,6 +247,7 @@ function bindShell() {
 async function openPanel(type) {
   currentView = 'panel';
   leaveWhatsApp();
+  app.innerHTML = '<section class="settings loadingPanel"><p class="card">Carregando…</p></section>';
   const data = await api('/api/settings');
   if (type === 'queues') {
     const monitor=await api('/api/queue-monitor');
@@ -288,7 +289,7 @@ async function automationEditor() {
 
 function bindConversation(conversation) {
   const oldToggle=document.querySelector('#toggleClientPanel');
-  if(oldToggle){ oldToggle.style.display=clientPanelOpen?'none':'inline-flex'; const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } }
+  if(oldToggle){ const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } oldToggle.remove(); }
   document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
   document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment]')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
   if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
