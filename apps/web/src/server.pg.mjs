@@ -463,7 +463,8 @@ async function handle(request, response) {
     const result=await sgp.lookup(company,selected.contact_phone),invoice=(result.customer?.invoices?.items||[]).find(item=>String(item.id)===String(requestInput.invoice_id));
     if(!invoice)return json(response,404,{error:'Fatura não encontrada ou já atualizada.'});
     const document=await sgp.invoice(company,invoice.id),agentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
-    const text=`Atendente ${agentName}:\n\nSegue sua fatura com vencimento em ${invoice.dueDate||'data não informada'}.\n\nCódigo de barras:\n${document.barcode}\n\nBoleto:\n${document.link}`;
+    const barcode=document.barcode?`\n\nCódigo de barras:\n${document.barcode}`:'\n\nO código de barras não foi disponibilizado pelo SGP nesta consulta.';
+    const text=`Atendente ${agentName}:\n\nSegue sua fatura com vencimento em ${invoice.dueDate||'data não informada'}.${barcode}\n\nBoleto:\n${document.link}`;
     const messageId=randomUUID();
     await db.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'outbound','pending')",[messageId,company,id,session.profile.id,text]);
     try{const sent=await sendOnTransport(selected.transport||await selectedTransport(company),company,{phone:selected.contact_phone,jid:selected.channel_address,text,correlation_id:messageId});await db.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null});}

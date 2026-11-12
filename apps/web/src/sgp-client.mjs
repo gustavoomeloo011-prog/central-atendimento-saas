@@ -78,8 +78,7 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     if(!response.ok||/\/accounts\/login/i.test(response.url))throw Error('O SGP não autorizou a abertura do boleto.');
     const html=await response.text(),candidates=(html.replace(/&nbsp;/gi,' ').match(/[\d.\s-]{44,90}/g)||[]).map(value=>({raw:value.trim().replace(/\s+/g,' '),digits:value.replace(/\D/g,'')}));
     const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
-    if(!line)throw Error('O SGP não retornou a linha digitável do boleto.');
-    return {invoiceId:id,barcode:line.raw,link:url.toString()};
+    return {invoiceId:id,barcode:line?.raw||null,link:url.toString()};
   }
   return { async invoice(companyId, invoiceId) { if (!env.SGP_COMPANY_ID || companyId !== env.SGP_COMPANY_ID) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId); }, async lookup(companyId, value) {
     // A global integration belongs exclusively to its explicitly configured tenant.
