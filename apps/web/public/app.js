@@ -19,18 +19,22 @@ let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
 let currentView = 'login';
-let queueSwitchBusy = false;
 const sgpData = new Map();
+function bindInvoiceButtons(id){
+  const panel=document.querySelector('#sgpDetails');
+  if(!panel||activeId!==id)return;
+  panel.querySelectorAll('.invoiceSend').forEach(button=>button.onclick=async()=>{try{button.disabled=true;button.textContent='Enviando…';await api('/api/conversations/'+encodeURIComponent(id)+'/send-invoice',{method:'POST',body:JSON.stringify({invoice_id:button.dataset.invoiceId})});button.textContent='Fatura enviada';await openConversation(id);}catch(error){button.disabled=false;button.textContent='Enviar fatura';alert(error.message);}});
+}
 async function loadSgp(id) {
   const previous=sgpData.get(id);
-  if(previous && Date.now()-previous.at<60000)return;
+  if(previous && Date.now()-previous.at<60000){bindInvoiceButtons(id);return;}
   sgpData.set(id,{at:Date.now(),value:null});
   let value;
   try { value=await api('/api/conversations/'+encodeURIComponent(id)+'/sgp'); }
   catch { value={status:'unavailable',message:'Não foi possível consultar os dados do SGP.'}; }
   sgpData.set(id,{at:Date.now(),value});
   const panel=document.querySelector('#sgpDetails');
-  if(activeId===id&&panel){panel.innerHTML=renderSgp(value); panel.querySelectorAll('.invoiceSend').forEach(button=>button.onclick=async()=>{try{button.disabled=true;await api('/api/conversations/'+encodeURIComponent(id)+'/send-invoice',{method:'POST',body:JSON.stringify({invoice_id:button.dataset.invoiceId})});button.textContent='Fatura enviada';}catch(error){button.disabled=false;alert(error.message);}});}
+  if(activeId===id&&panel){panel.innerHTML=renderSgp(value);bindInvoiceButtons(id);}
 }
 
 const api = async (path, options = {}) => {
@@ -201,12 +205,12 @@ function render() {
     const mode = document.createElement('div'); mode.className = 'inboxModes';
     mode.innerHTML = modes.map(item => { const count=list.filter(row=>inQueue(row,item.id,state.profile.id)).length; return '<button class="btn queueMode ' + (inboxMode === item.id ? '' : 'subtle') + '" type="button" data-inbox-mode="' + item.id + '" aria-label="' + item.label + ', ' + count + ' conversas" title="' + item.label + ' ('+count+')">' + item.symbol + '<span class="queueCount">' + count + '</span></button>'; }).join('') + '<button class="iconButton" id="newConversation" type="button" aria-label="Nova conversa" title="Nova conversa">＋</button>';
     mode.querySelectorAll('[data-inbox-mode]').forEach(button => {
-      button.onclick = event => { event.preventDefault(); event.stopPropagation(); if(queueSwitchBusy)return; queueSwitchBusy=true;
+      button.onclick = event => { event.preventDefault(); event.stopPropagation();
         inboxMode = button.dataset.inboxMode;
         protocolQuery = '';
         activeId = null;
         state.detail = null;
-        requestAnimationFrame(()=>{render(); queueSwitchBusy=false;});
+        render();
       };
     });
     mode.querySelector('#newConversation').onclick=()=>showNewConversationCard();
@@ -254,9 +258,10 @@ async function openPanel(type) {
   currentView = 'panel';
   leaveWhatsApp();
   app.innerHTML = '<section class="settings loadingPanel"><p class="card">Carregando…</p></section>';
+  const monitorPromise=type==='queues'?api('/api/queue-monitor'):null;
   const data = await api('/api/settings');
   if (type === 'queues') {
-    const monitor=await api('/api/queue-monitor');
+    const monitor=await monitorPromise;
     const fmt=ms=>{const s=Math.max(0,Math.floor(ms/1000));return String(Math.floor(s/60)).padStart(2,'0')+'m '+String(s%60).padStart(2,'0')+'s';};
     const stat=(label,value,tone)=>'<article class="card queueStat '+tone+'"><span>'+label+'</span><h2>'+value+'</h2></article>';
     const rows=monitor.queues.map(q=>'<tr><td><b>'+esc(q.name)+'</b></td><td>'+q.active+'</td><td>'+q.waiting+'</td><td>'+fmt(q.averageWaitMs)+'</td></tr>').join('');
@@ -294,6 +299,7 @@ async function automationEditor() {
 }
 
 function bindConversation(conversation) {
+  bindInvoiceButtons(conversation.id);
   const oldToggle=document.querySelector('#toggleClientPanel');
   if(oldToggle){ const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(clientPanelOpen){ oldToggle.remove(); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } } else { oldToggle.textContent='▣ Mostrar dados'; oldToggle.title='Mostrar dados do cliente'; oldToggle.style.display='inline-flex'; oldToggle.onclick=()=>{clientPanelOpen=true;localStorage.setItem('central_client_panel','1');render();}; } }
   document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});

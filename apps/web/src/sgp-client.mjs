@@ -59,7 +59,18 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     }
     return { status: 'found', customer: result, checkedAt: new Date(clock()).toISOString() };
   }
-  return { async lookup(companyId, value) {
+  async function invoiceDocument(invoiceId) {
+    const id=String(invoiceId||'').trim();
+    if(!/^\d+$/.test(id))throw Error('Identificador de fatura inválido.');
+    const base=new URL(env.SGP_BASE_URL),url=new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(id),base);
+    const response=await fetcher(url,{headers:{Accept:'text/html,application/xhtml+xml',Authorization:'Basic '+Buffer.from(env.SGP_USERNAME+':'+env.SGP_PASSWORD).toString('base64')},redirect:'follow',signal:AbortSignal.timeout(15000)});
+    if(!response.ok||/\/accounts\/login/i.test(response.url))throw Error('O SGP não autorizou a abertura do boleto.');
+    const html=await response.text(),candidates=(html.replace(/&nbsp;/gi,' ').match(/[\d.\s-]{44,90}/g)||[]).map(value=>({raw:value.trim().replace(/\s+/g,' '),digits:value.replace(/\D/g,'')}));
+    const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
+    if(!line)throw Error('O SGP não retornou a linha digitável do boleto.');
+    return {invoiceId:id,barcode:line.raw,link:url.toString()};
+  }
+  return { async invoice(companyId, invoiceId) { if (!env.SGP_COMPANY_ID || companyId !== env.SGP_COMPANY_ID) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId); }, async lookup(companyId, value) {
     // A global integration belongs exclusively to its explicitly configured tenant.
     if (!env.SGP_COMPANY_ID || companyId !== env.SGP_COMPANY_ID) return { status: 'not_configured' };
     if (!env.SGP_BASE_URL || !env.SGP_USERNAME || !env.SGP_PASSWORD) return { status: 'not_configured' };

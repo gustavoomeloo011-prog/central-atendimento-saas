@@ -10,9 +10,9 @@ export function renderSgp(data) {
   }
   const c = data.customer;
   const money = value => value == null ? 'Não informado' : Number(value).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-  const dueValue = value => { const match=String(value||'').match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/); return match ? new Date(Number(match[3]),Number(match[2])-1,Number(match[1])) : null; };
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()+30);
-  const financeItems = (c.invoices?.items||[]).filter(item => { const due=dueValue(item.dueDate); return item.overdue || (due && due <= cutoff); });
+  const dueValue = value => { const raw=String(value||'').trim(),br=raw.match(/^(\d{2})[\/-](\d{2})[\/-](\d{4})/),iso=raw.match(/^(\d{4})-(\d{2})-(\d{2})/); return br?new Date(Number(br[3]),Number(br[2])-1,Number(br[1])):iso?new Date(Number(iso[1]),Number(iso[2])-1,Number(iso[3])):null; };
+  const today = new Date(); today.setHours(0,0,0,0); const cutoff = new Date(today.getFullYear(),today.getMonth()+2,0,23,59,59,999);
+  const financeItems = (c.invoices?.items||[]).filter(item => { const due=dueValue(item.dueDate); return due && (due < today || due <= cutoff); }).sort((a,b)=>dueValue(a.dueDate)-dueValue(b.dueDate));
   const hasOnline=(c.contracts||[]).some(contract=>(contract.services||[]).some(service=>service.online===true));
   const hasOverdue=Number(c.invoices?.overdue||0)>0;
   return heading + '<div class="sgpBadges"><span class="statusChip open">Cliente identificado</span>' + (hasOnline?'<span class="statusChip online">ONU online</span>':'') + (hasOverdue?'<span class="statusChip waiting">Fatura pendente</span>':'') + '</div><section class="sgpSection"><h4>Cadastro</h4><dl class="clientData">' + field('Nome',c.name) + field('CPF/CNPJ',c.document) + field('ID cliente',c.id) + '</dl></section>' +
