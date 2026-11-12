@@ -463,7 +463,7 @@ async function handle(request, response) {
     const result=await sgp.lookup(company,selected.contact_phone),invoice=(result.customer?.invoices?.items||[]).find(item=>String(item.id)===String(requestInput.invoice_id));
     if(!invoice)return json(response,404,{error:'Fatura não encontrada ou já atualizada.'});
     const document=await sgp.invoice(company,invoice.id),agentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
-    const barcode=document.barcode?`\n\nCódigo de barras:\n${document.barcode}`:'\n\nO código de barras não foi disponibilizado pelo SGP nesta consulta.';
+    const barcode=document.barcode?`\n\nCódigo de barras:\n${document.barcode}`:'';
     const text=`Atendente ${agentName}:\n\nSegue sua fatura com vencimento em ${invoice.dueDate||'data não informada'}.${barcode}\n\nBoleto:\n${document.link}`;
     const messageId=randomUUID();
     await db.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'outbound','pending')",[messageId,company,id,session.profile.id,text]);

@@ -76,7 +76,7 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
       response=await fetcher(url,{headers:{Cookie:cookies(),Accept:'text/html'},redirect:'manual',signal:AbortSignal.timeout(15000)});
     }
     if(!response.ok||/\/accounts\/login/i.test(response.url))throw Error('O SGP não autorizou a abertura do boleto.');
-    const html=await response.text(),candidates=(html.replace(/&nbsp;/gi,' ').match(/[\d.\s-]{44,90}/g)||[]).map(value=>({raw:value.trim().replace(/\s+/g,' '),digits:value.replace(/\D/g,'')}));
+    const html=await response.text(),plain=html.replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/gi,' '),candidates=(plain.match(/[\d.\s-]{44,90}/g)||[]).map(value=>({raw:value.trim().replace(/\s+/g,' '),digits:value.replace(/\D/g,'')}));
     const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
     return {invoiceId:id,barcode:line?.raw||null,link:url.toString()};
   }
