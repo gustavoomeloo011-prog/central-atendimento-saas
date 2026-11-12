@@ -29,7 +29,7 @@ async function loadSgp(id) {
   catch { value={status:'unavailable',message:'Não foi possível consultar os dados do SGP.'}; }
   sgpData.set(id,{at:Date.now(),value});
   const panel=document.querySelector('#sgpDetails');
-  if(activeId===id&&panel)panel.innerHTML=renderSgp(value);
+  if(activeId===id&&panel){panel.innerHTML=renderSgp(value); panel.querySelectorAll('.invoiceSend').forEach(button=>button.onclick=async()=>{try{button.disabled=true;await api('/api/conversations/'+encodeURIComponent(id)+'/send-invoice',{method:'POST',body:JSON.stringify({invoice_id:button.dataset.invoiceId})});button.textContent='Fatura enviada';}catch(error){button.disabled=false;alert(error.message);}});}
 }
 
 const api = async (path, options = {}) => {
@@ -151,7 +151,9 @@ async function openConversation(id) {
 }
 
 function shell(content, title = 'Caixa de entrada') {
-  return '<div class="shell'+(clientPanelOpen?'':' clientPanelClosed')+'"><aside class="side"><div class="sideBrand"><span class="brandMark">◔</span><div><h2>SG Fibra</h2><small>Central de atendimento</small></div></div><div class="nav"><button class="navButton activeNav" id="inbox"><span>▣</span> Atendimentos</button><button class="navButton" id="queues"><span>◇</span> Filas</button><button class="navButton" id="team"><span>♙</span> Equipe</button><button class="navButton" id="automations"><span>♙</span> Robôs</button><button class="navButton" id="indicators"><span>▥</span> Indicadores</button><button class="navButton" id="settings"><span>⚙</span> Configurações</button><button class="navButton logoutButton" id="logout"><span>↪</span> Sair</button></div></aside><header class="top"><button class="menuToggle" id="menuToggle" aria-label="Abrir ou fechar menu">☰</button><div class="pageTitle"><b>' + (title === 'Caixa de entrada' ? 'Atendimentos' : title) + '</b><span class="muted">' + esc(state.company.name) + '</span></div><div class="profileBadge"><span class="profileAvatar">' + esc(initials(state.profile.name)) + '</span><span><b>' + esc(state.profile.name) + '</b><small>' + esc(state.profile.role) + '</small></span></div></header>' + content + '</div>';
+  const active = title === 'Caixa de entrada' ? 'inbox' : ({Filas:'queues',Equipe:'team',Automações:'automations',Indicadores:'indicators',Configurações:'settings'}[title] || 'inbox');
+  const nav = [['inbox','▣','Atendimentos'],['queues','◇','Filas'],['team','♙','Equipe'],['automations','♙','Robôs'],['indicators','▥','Indicadores'],['settings','⚙','Configurações']].map(([id,icon,label])=>'<button class="navButton '+(active===id?'activeNav':'')+'" id="'+id+'"><span>'+icon+'</span> '+label+'</button>').join('');
+  return '<div class="shell'+(clientPanelOpen?'':' clientPanelClosed')+'"><aside class="side"><div class="sideBrand"><span class="brandMark">◔</span><div><h2>SG Fibra</h2><small>Central de atendimento</small></div></div><div class="nav">'+nav+'<button class="navButton logoutButton" id="logout"><span>↪</span> Sair</button></div></aside><header class="top"><button class="menuToggle" id="menuToggle" aria-label="Abrir ou fechar menu">☰</button><div class="pageTitle"><b>' + (title === 'Caixa de entrada' ? 'Atendimentos' : title) + '</b><span class="muted">' + esc(state.company.name) + '</span></div><div class="profileBadge"><span class="profileAvatar">' + esc(initials(state.profile.name)) + '</span><span><b>' + esc(state.profile.name) + '</b><small>' + esc(state.profile.role) + '</small></span></div></header>' + content + '</div>';
 }
 
 function render() {
@@ -168,7 +170,7 @@ function render() {
   const conversation = list.find(item => item.id === activeId);
   const messages = state.detail?.conversation?.id === activeId ? state.detail.messages : [];
   const queueCount = list.filter(isInInboxMode).length;
-  const queueName = ({general:'Robô / Geral',human:'Aguardando atendente',mine:'Meus atendimentos',closed:'Encerrados'})[inboxMode] || 'Atendimentos';
+  const queueName = ({general:'🤖 Robô / Geral',human:'🎧 Aguardando atendente',mine:'👤 Meus atendimentos',closed:'✅ Encerrados'})[inboxMode] || 'Atendimentos';
   const inbox = '<section class="list"><div class="listTitle"><div><h2>Conversas <span class="queueTotal">'+queueCount+'</span></h2><small class="activeQueueLabel">'+esc(queueName)+'</small></div><button class="iconButton" id="refresh" title="Atualizar">↻</button></div><div class="toolbar">' + (inboxMode === 'closed' ? '<small class="retentionHint" title="Encerrados saem desta lista após 24 horas; o histórico é preservado">Visíveis por 24h · conversas antigas permanecem no histórico</small>' : '') + '<label class="protocolSearch"><span>⌕</span><input id="protocolSearch" type="search" autocomplete="off" placeholder="Cliente, telefone ou protocolo…" aria-label="Buscar atendimento" value="' + esc(protocolQuery) + '"></label></div><div class="conversationList">' + list.map(item => { const waiting=item.status==='waiting'; const clockStart=waiting?(item.human_started_at||item.created_at):item.status==='closed'?(item.closed_at||item.updated_at):(item.updated_at||item.created_at); const clockTitle=waiting?'Tempo aguardando atendente':item.status==='open'?'Última atividade':'Encerrado há'; const owner=item.assignee_name?'👤 '+item.assignee_name:waiting?'⌛ Sem responsável':'🤖 Robô'; return '<article class="conversation ' + (item.id === activeId ? 'active ' : '') + queueTone(item) + '" data-id="' + item.id + '" data-protocol="' + esc(item.protocol || '') + '"' + (isVisibleInList(item) ? '' : ' hidden') + '><span class="conversationAvatar">' + esc(initials(item.contact_name)) + '</span><div class="conversationMain"><div class="conversationTop"><b>' + esc(item.contact_name) + '</b><time title="'+clockTitle+'">◷ <span data-clock-start="'+esc(clockStart)+'">' + esc(elapsed(clockStart)) + '</span></time></div><div class="conversationPreview">' + esc(item.last_message || item.subject) + '</div><div class="conversationMeta"><span class="statusChip ' + item.status + ' ' + queueTone(item) + '">' + esc(attendanceLabel(item.status)) + '</span><small title="Fila">' + esc(item.department_name || 'Sem fila') + '</small></div><small class="conversationOwner">'+esc(owner)+'</small><small class="protocolLabel">' + esc(item.protocol || 'Protocolo pendente') + '</small></div></article>'; }).join('') + '</div></section>';
   const shortcuts = (state.quickReplies || []).map(reply => '<button class="quick" data-quick="' + esc(reply.shortcut) + '">' + esc(reply.shortcut) + '</button>').join('');
   const quickDock = '<div class="quickDock"><button class="quickToggle" id="quickToggle" type="button" aria-label="Abrir mensagens rápidas">⚡</button><div class="quickPalette" id="quickPalette">' + shortcuts + '</div></div>';
@@ -262,8 +264,10 @@ async function openPanel(type) {
   } else if (type === 'automations') {
     const flows = (await api('/api/flows')).flows;
     const cards = flows.length ? flows.map(flow => '<article class="card"><span class="tag">' + esc(flow.status === 'published' ? 'ATIVO' : flow.status) + '</span><h3>' + esc(flow.name) + '</h3><p class="muted">Versão publicada: ' + esc(flow.published_version || 'nenhuma') + '</p></article>').join('') : '<article class="card"><h3>Nenhum fluxo cadastrado</h3><p class="muted">Abra o editor visual e configure o atendimento SG Fibra.</p></article>';
-    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Automações</h2><p class="muted">Crie caminhos de atendimento com blocos conectados e teste antes de publicar.</p></div><button class="btn" id="manageAutomation">Abrir editor visual</button></div><div class="settingsGrid">' + cards + '</div></section>', 'Automações');
+    const enabled=flows.some(flow=>flow.status==='published');
+    app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Automações</h2><p class="muted">Crie caminhos de atendimento com blocos conectados e teste antes de publicar.</p></div><div class="automationActions"><label class="switchLabel">Robô <input type="checkbox" id="robotToggle" '+(enabled?'checked':'')+'><span class="switchTrack"></span></label><button class="btn" id="manageAutomation">Abrir editor visual</button></div></div><div class="settingsGrid">' + cards + '</div></section>', 'Automações');
     document.querySelector('#manageAutomation').onclick = automationEditor;
+    document.querySelector('#robotToggle').onchange=async event=>{try{await api('/api/automation/toggle',{method:'POST',body:JSON.stringify({enabled:event.target.checked})});await openPanel('automations');}catch(error){event.target.checked=!event.target.checked;alert(error.message);}};
   } else {
     const total = state.conversations.length;
     const waiting = state.conversations.filter(item => item.status === 'waiting').length;
@@ -283,6 +287,8 @@ async function automationEditor() {
 }
 
 function bindConversation(conversation) {
+  const oldToggle=document.querySelector('#toggleClientPanel');
+  if(oldToggle){ oldToggle.style.display=clientPanelOpen?'none':'inline-flex'; const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } }
   document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
   document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment]')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
   if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
@@ -311,7 +317,7 @@ function bindConversation(conversation) {
       if(file&&file.size>10*1024*1024)throw Error('O arquivo deve possuir no máximo 10 MB.');
       let attachment=null;
       if(file){const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('Não foi possível ler o arquivo.'));reader.readAsDataURL(file);});attachment={name:file.name,type:file.type,data};}
-      const payload={body:new FormData(event.target).get('body'),reply_to_id:replyTo?.id||null,attachment};
+      const rawBody=String(new FormData(event.target).get('body')||''); const agentLabel=String(state.profile.display_name||state.profile.name||'Atendente').trim(); const payload={body:rawBody,reply_to_id:replyTo?.id||null,attachment,agent_label:agentLabel};
       const button=event.submitter;button.disabled=true;button.textContent='Enviando…';
       await api('/api/conversations/' + conversation.id + '/messages', { method: 'POST', body: JSON.stringify(payload) });
       replyTo=null;

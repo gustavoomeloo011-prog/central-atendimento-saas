@@ -22,6 +22,6 @@ export function renderSgp(data) {
         field('Sinal RX',s.rxDbm == null ? null : s.rxDbm + ' dBm') + field('Sinal TX',s.txDbm == null ? null : s.txDbm + ' dBm') : '') + '</dl>' +
       (s.rxDbm != null ? '<small>Último sinal armazenado no SGP; horário da medição não informado.</small>' : '')).join('') + '</section>').join('') +
     '<section class="sgpSection financeSection"><h4>Financeiro</h4>' + (c.invoices ? '<p class="financeSummary"><b>' + esc(financeItems.length) + '</b> fatura(s) vencida(s) ou próximas de vencer</p><div class="invoiceList">' + financeItems.slice(0,8).map(t =>
-      '<p><span>Contrato ' + esc(t.contractId) + '<small>' + esc(t.dueDate) + '</small></span><b>' + esc(money(t.amount)) + '</b></p>').join('') + (financeItems.length?'':'<small>Nenhuma fatura vencida ou com vencimento nos próximos 30 dias.</small>') + '</div>' : '<p>Informação indisponível.</p>') + '</section>' +
+      '<p><span>Contrato ' + esc(t.contractId) + '<small>' + esc(t.dueDate) + '</small></span><b>' + esc(money(t.amount)) + '</b><button class="btn invoiceSend" type="button" data-invoice-id="'+esc(t.id)+'" title="Enviar código de barras e link">Enviar fatura</button></p>').join('') + (financeItems.length?'':'<small>Nenhuma fatura vencida ou com vencimento nos próximos 30 dias.</small>') + '</div>' : '<p>Informação indisponível.</p>') + '</section>' +
     '<small class="sgpUpdated">Atualizado em ' + esc(new Date(data.checkedAt).toLocaleString('pt-BR')) + ' · cache de 60s</small>';
 }
