@@ -19,6 +19,7 @@ let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
 let currentView = 'login';
+let queueSwitchBusy = false;
 const sgpData = new Map();
 async function loadSgp(id) {
   const previous=sgpData.get(id);
@@ -195,12 +196,12 @@ function render() {
     const mode = document.createElement('div'); mode.className = 'inboxModes';
     mode.innerHTML = modes.map(item => { const count=list.filter(row=>inQueue(row,item.id,state.profile.id)).length; return '<button class="btn queueMode ' + (inboxMode === item.id ? '' : 'subtle') + '" type="button" data-inbox-mode="' + item.id + '" aria-label="' + item.label + ', ' + count + ' conversas" title="' + item.label + ' ('+count+')">' + item.symbol + '<span class="queueCount">' + count + '</span></button>'; }).join('') + '<button class="iconButton" id="newConversation" type="button" aria-label="Nova conversa" title="Nova conversa">＋</button>';
     mode.querySelectorAll('[data-inbox-mode]').forEach(button => {
-      button.onclick = () => {
+      button.onclick = event => { event.preventDefault(); event.stopPropagation(); if(queueSwitchBusy)return; queueSwitchBusy=true;
         inboxMode = button.dataset.inboxMode;
         protocolQuery = '';
         activeId = null;
         state.detail = null;
-        render();
+        requestAnimationFrame(()=>{render(); queueSwitchBusy=false;});
       };
     });
     mode.querySelector('#newConversation').onclick=async()=>{const phone=prompt('DDD + número do WhatsApp (ex.: 11999999999)');if(!phone)return;const name=prompt('Nome do contato (opcional)')||'';try{const result=await api('/api/conversations',{method:'POST',body:JSON.stringify({phone,name})});await boot();await openConversation(result.conversation.id);}catch(error){alert(error.message);}};
