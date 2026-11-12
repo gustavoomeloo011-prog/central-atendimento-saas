@@ -249,8 +249,8 @@ async function handle(request, response) {
           const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
           if(/^[1-3]$/.test(String(text).trim())){
-            const rated=await tx.one("select c.id,c.protocol,c.closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]);
-            if(rated){await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(String(text).trim())]);processed++;continue;}
+            const rated=await tx.one("select c.id,c.protocol,null::text as closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]);
+            if(rated){try{await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(String(text).trim())]);}catch(error){if(error.code!=='42703')throw error;await tx.query('insert into public.conversation_ratings(id,company_id,conversation_id,protocol,stars) values($1,$2,$3,$4,$5) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.protocol,Number(String(text).trim())]);}processed++;continue;}
           }
           let c = await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update", [company, phone]);
           const provider=c?.transport||companyTransport;
@@ -337,8 +337,8 @@ async function handle(request, response) {
     const inboundProviderId=String(input.message_id||'')||null;
     if(inboundProviderId){const duplicate=await db.one('select conversation_id from public.messages where provider_message_id=$1',[inboundProviderId]);if(duplicate)return json(response,200,{ok:true,conversation_id:duplicate.conversation_id,reply:null,duplicate:true});}
     if(/^[1-3]$/.test(text)){
-      const rated=await db.one("select c.id,c.protocol,c.contact_phone,c.channel_address,c.transport,c.closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]).catch(()=>null);
-      if(rated){await db.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars,comment) values($1,$2,$3,$4,$5,$6,$7) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(text),null]);try{await sendOnTransport(rated.transport||defaultTransport,company,{phone:rated.contact_phone,jid:rated.channel_address,text:'Obrigado pela avaliação! Sua nota foi registrada.'});}catch{}return json(response,201,{ok:true,rating:Number(text),conversation_id:rated.id});}
+      const rated=await db.one("select c.id,c.protocol,c.contact_phone,c.channel_address,c.transport,null::text as closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]).catch(()=>null);
+      if(rated){try{await db.query('insert into public.conversation_ratings(id,company_id,conversation_id,profile_id,protocol,stars,comment) values($1,$2,$3,$4,$5,$6,$7) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.closed_by_profile_id||null,rated.protocol,Number(text),null]);}catch(error){if(error.code!=='42703')throw error;await db.query('insert into public.conversation_ratings(id,company_id,conversation_id,protocol,stars,comment) values($1,$2,$3,$4,$5,$6) on conflict(conversation_id) do nothing',[randomUUID(),company,rated.id,rated.protocol,Number(text),null]);}try{await sendOnTransport(rated.transport||defaultTransport,company,{phone:rated.contact_phone,jid:rated.channel_address,text:'Obrigado pela avaliação! Sua nota foi registrada.'});}catch{}return json(response,201,{ok:true,rating:Number(text),conversation_id:rated.id});}
     }
     // Look up SGP only when this conversation is about to start a robot run.
     // The adapter caches and coalesces requests; no SGP credentials/data leave the backend.
@@ -531,7 +531,10 @@ async function handle(request, response) {
       const c=await tx.one('select * from public.conversations where company_id=$1 and id=$2 for update',[company,id]);
       if(action==='assume'||action==='close')await tx.query('update public.flow_runs set status=$1,updated_at=now() where company_id=$2 and conversation_id=$3',[action==='close'?'finished':'paused',company,id]);
       if(action==='assume')await tx.query("update public.conversations set assigned_profile_id=$1,status='open',closed_at=null,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company]);
-      if(action==='close')await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_by_profile_id=$3,closed_at=now(),updated_at=now() where id=$1 and company_id=$2",[id,company,session.profile.id]);
+      if(action==='close'){
+        try{await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_by_profile_id=$3,closed_at=now(),updated_at=now() where id=$1 and company_id=$2",[id,company,session.profile.id]);}
+        catch(error){if(error.code!=='42703')throw error;await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where id=$1 and company_id=$2",[id,company]);}
+      }
       if(action==='transfer'){
         const d=await tx.one('select id from public.departments where id=$1 and company_id=$2',[input.department_id,company]);
         if(!d)return {error:'Setor inválido.'};
