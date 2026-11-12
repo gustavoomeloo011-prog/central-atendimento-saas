@@ -17,6 +17,7 @@ function leaveWhatsApp() { whatsappView++; clearTimeout(whatsappTimer); }
 let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
+let currentView = 'login';
 const sgpData = new Map();
 async function loadSgp(id) {
   const previous=sgpData.get(id);
@@ -48,6 +49,7 @@ const supervisor = () => ['supervisor', 'company_admin', 'superadmin'].includes(
 const queueTone = item => { const text=String(item.department_name||item.subject||'').toLowerCase(); return /financ|fatura|boleto/.test(text)?'tone-finance':/suporte|t[eé]cnic|reparo|sinal/.test(text)?'tone-support':/segunda|2ª|via/.test(text)?'tone-invoice':/venda|comercial|plano/.test(text)?'tone-sales':'tone-default'; };
 
 function login() {
+  currentView = 'login';
   leaveWhatsApp();
   app.innerHTML = '<section class="login"><div class="brand"><span class="tag">ATENDIMENTO SG FIBRA</span><h1>Central de Atendimento</h1><p class="muted">Conversas, equipes, filas e automações em um só lugar.</p></div><form class="card" id="login"><h2>Entrar</h2><label class="field">Usuário ou e-mail<input name="email" type="text" autocomplete="username" required></label><label class="field">Senha<input name="password" type="password" autocomplete="current-password" required></label><button class="btn">Entrar</button><button type="button" class="btn subtle" id="recover">Esqueci minha senha</button></form></section>';
   document.querySelector('#recover').onclick = () => { app.innerHTML='<section class="login"><div class="brand"><span class="tag">ATENDIMENTO SG FIBRA</span><h1>Recuperar acesso</h1><p class="muted">Informe o e-mail cadastrado para receber um link de recuperação.</p></div><form class="card" id="recovery"><label class="field">E-mail cadastrado<input name="email" type="email" autocomplete="email" required></label><button class="btn">Enviar link</button><button type="button" class="btn subtle" id="backLogin">Voltar ao login</button><p class="muted" id="recoveryMessage"></p></form></section>'; document.querySelector('#backLogin').onclick=login; document.querySelector('#recovery').onsubmit=async event=>{event.preventDefault();const email=new FormData(event.target).get('email');try{const result=await api('/api/recover-password',{method:'POST',body:JSON.stringify({email})});document.querySelector('#recoveryMessage').textContent=result.message||'Se existir uma conta vinculada a este e-mail, enviaremos as instruções para recuperação de acesso.';event.target.querySelector('button').disabled=true;}catch(error){document.querySelector('#recoveryMessage').textContent='Não foi possível processar a solicitação agora.';}}; };
@@ -81,11 +83,12 @@ async function boot() {
 }
 
 async function refreshLive() {
-  if (!token || document.hidden || document.activeElement?.matches('textarea,input,select')) return;
+  if (currentView !== 'inbox' || !token || document.hidden || document.activeElement?.matches('textarea,input,select')) return;
   try {
     if(activeId&&document.querySelector('#sgpDetails'))void loadSgp(activeId);
     const next = await api('/api/bootstrap');
     const detail = activeId ? await api('/api/conversations/' + activeId) : null;
+    if (currentView !== 'inbox') return;
     const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
     const after = JSON.stringify([(next.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message]),(detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
     if (before !== after || (inboxMode === 'closed' && document.querySelector('.list'))) { state = {...next,detail}; render(); }
@@ -115,6 +118,7 @@ function shell(content, title = 'Caixa de entrada') {
 }
 
 function render() {
+  currentView = 'inbox';
   leaveWhatsApp();
   const list = [...(state.conversations || [])].sort((a, b) => inboxMode === 'human' ? new Date(a.human_started_at || a.created_at || 0) - new Date(b.human_started_at || b.created_at || 0) : new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
   const isInInboxMode = item => inQueue(item,inboxMode,state.profile.id);
@@ -198,6 +202,7 @@ function bindShell() {
 }
 
 async function openPanel(type) {
+  currentView = 'panel';
   leaveWhatsApp();
   const data = await api('/api/settings');
   if (type === 'queues') {
@@ -231,6 +236,7 @@ async function openPanel(type) {
 }
 
 async function automationEditor() {
+  currentView = 'editor';
   leaveWhatsApp();
   return showFlowEditor({app,api,shell,bindShell,esc,back:()=>openPanel('automations')});
 }
@@ -307,6 +313,7 @@ async function conversationAction(id, action, data = {}) {
 }
 
 async function settings() {
+  currentView = 'settings';
   leaveWhatsApp();
   const data = await api('/api/settings');
   const manager = supervisor();
@@ -340,6 +347,7 @@ async function submit(event, path, after, method='POST') {
 }
 
 async function whatsapp() {
+  currentView = 'whatsapp';
   const view = ++whatsappView;
   clearTimeout(whatsappTimer);
   const refresh = () => { if (view === whatsappView) whatsapp(); };
