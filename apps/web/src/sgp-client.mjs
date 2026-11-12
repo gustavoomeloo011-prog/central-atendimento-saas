@@ -63,7 +63,18 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     const id=String(invoiceId||'').trim();
     if(!/^\d+$/.test(id))throw Error('Identificador de fatura inválido.');
     const base=new URL(env.SGP_BASE_URL),url=new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(id),base);
-    const response=await fetcher(url,{headers:{Accept:'text/html,application/xhtml+xml',Authorization:'Basic '+Buffer.from(env.SGP_USERNAME+':'+env.SGP_PASSWORD).toString('base64')},redirect:'follow',signal:AbortSignal.timeout(15000)});
+    let response=await fetcher(url,{headers:{Accept:'text/html,application/xhtml+xml',Authorization:'Basic '+Buffer.from(env.SGP_USERNAME+':'+env.SGP_PASSWORD).toString('base64')},redirect:'follow',signal:AbortSignal.timeout(15000)});
+    if(response.ok&&/\/accounts\/login/i.test(response.url)){
+      const loginUrl=new URL('/accounts/login/',base),jar=new Map();
+      const capture=r=>{for(const value of r.headers.getSetCookie()){const pair=value.split(';')[0],at=pair.indexOf('=');jar.set(pair.slice(0,at),pair.slice(at+1));}};
+      const cookies=()=>[...jar].map(([key,value])=>key+'='+value).join('; ');
+      const login=await fetcher(loginUrl,{redirect:'manual',signal:AbortSignal.timeout(15000)});capture(login);
+      const html=await login.text(),csrf=html.match(/name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)/)?.[1]||jar.get('csrftoken');
+      if(!csrf)throw Error('Não foi possível iniciar a sessão SGP.');
+      const authenticated=await fetcher(loginUrl,{method:'POST',headers:{Cookie:cookies(),Referer:loginUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({username:env.SGP_USERNAME,password:env.SGP_PASSWORD,csrfmiddlewaretoken:csrf,next:'/admin/'}),redirect:'manual',signal:AbortSignal.timeout(15000)});capture(authenticated);
+      if(![302,303].includes(authenticated.status))throw Error('O SGP recusou o login para consultar o boleto.');
+      response=await fetcher(url,{headers:{Cookie:cookies(),Accept:'text/html'},redirect:'manual',signal:AbortSignal.timeout(15000)});
+    }
     if(!response.ok||/\/accounts\/login/i.test(response.url))throw Error('O SGP não autorizou a abertura do boleto.');
     const html=await response.text(),candidates=(html.replace(/&nbsp;/gi,' ').match(/[\d.\s-]{44,90}/g)||[]).map(value=>({raw:value.trim().replace(/\s+/g,' '),digits:value.replace(/\D/g,'')}));
     const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
