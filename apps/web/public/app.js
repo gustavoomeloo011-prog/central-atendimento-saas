@@ -5,6 +5,23 @@ import { showFlowEditor } from './flow-editor.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
 let token = localStorage.getItem('central_token');
+setInterval(()=>{fetch('/health',{cache:'no-store'}).catch(()=>{});},600000);
+const mediaObjects=new Map();
+new MutationObserver(()=>{
+  for(const [element,url] of mediaObjects)if(!element.isConnected){URL.revokeObjectURL(url);mediaObjects.delete(element);}
+  document.querySelectorAll('.messageMedia:not([data-loaded])').forEach(async element=>{
+    element.dataset.loaded='true';
+    const source=element.getAttribute('data-media-src');
+    if(!source)return;
+    try{
+      const result=await fetch(source,{headers:{authorization:'Bearer '+token}});
+      if(!result.ok)throw Error('Mídia indisponível');
+      const blob=await result.blob();if(!element.isConnected)return;
+      const url=URL.createObjectURL(blob);mediaObjects.set(element,url);element.src=url;
+      element.style.maxWidth='100%';element.style.maxHeight='320px';
+    }catch{element.insertAdjacentText('afterend',' Mídia indisponível. Abra novamente a conversa para tentar.');}
+  });
+}).observe(app,{childList:true,subtree:true});
 let state = {};
 let activeId = null;
 let menuClosed = localStorage.getItem('central_menu_closed') === null ? matchMedia('(max-width: 850px)').matches : localStorage.getItem('central_menu_closed') === '1';
@@ -118,7 +135,7 @@ function messageHtml(message) {
   const internal = message.direction === 'internal';
   const robot = !internal && message.direction === 'outbound' && /autom[aá]tico|rob[oô]/i.test(message.author_name || '');
   const mediaUrl=message.attachment_path?'/api/attachments/'+encodeURIComponent(message.id):'';
-  const attachment = message.attachment_path ? (String(message.attachment_type||'').startsWith('image/') ? '<img class="messageMedia" src="'+mediaUrl+'" alt="'+esc(message.attachment_name||'Imagem recebida')+'" loading="lazy">' : String(message.attachment_type||'').startsWith('audio/') ? '<audio class="messageMedia" controls preload="metadata" src="'+mediaUrl+'"></audio>' : String(message.attachment_type||'').startsWith('video/') ? '<video class="messageMedia" controls preload="metadata" src="'+mediaUrl+'"></video>' : '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>') : '';
+  const attachment = message.attachment_path ? (String(message.attachment_type||'').startsWith('image/') ? '<img class="messageMedia" data-media-src="'+mediaUrl+'" alt="'+esc(message.attachment_name||'Imagem recebida')+'" loading="lazy">' : String(message.attachment_type||'').startsWith('audio/') ? '<audio class="messageMedia" controls preload="metadata" data-media-src="'+mediaUrl+'"></audio>' : String(message.attachment_type||'').startsWith('video/') ? '<video class="messageMedia" controls preload="metadata" data-media-src="'+mediaUrl+'"></video>' : '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>') : '';
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
   const author = internal ? 'Nota interna' : robot ? 'Robô SG Fibra' : message.direction === 'inbound' ? 'Cliente' : (message.author_name || 'Atendente');

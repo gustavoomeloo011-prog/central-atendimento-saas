@@ -249,6 +249,7 @@ async function handle(request, response) {
           if (!claimed) { duplicates++; continue; }
           const phone = String(message.from || '').replace(/\D/g, '');
           const inbound=parseMetaInbound(message);
+          const media=['image','audio','video','document','sticker'].includes(message.type)?message[message.type]:null;
           const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
           const ratingValue=/^rating_[1-3]$/.test(String(inbound?.optionId||''))?Number(String(inbound.optionId).slice(-1)):Number(String(text).trim());
@@ -269,6 +270,7 @@ async function handle(request, response) {
             c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport,human_started_at) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7,'meta',case when not exists(select 1 from public.automation_flows where company_id=$2 and status='published') then now() end) returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
           }
           await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
+          if(media?.id&&/^\d+$/.test(String(media.id)))await tx.query('update public.messages set attachment_path=$1,attachment_type=$2,attachment_name=$3 where company_id=$4 and provider_message_id=$5',[`meta:${media.id}`,media.mime_type||'application/octet-stream',media.filename||message.type,company,providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
           if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'){
             const flowInput=inbound?.kind==='option'?inbound:(inbound?.value||text);
@@ -402,6 +404,20 @@ async function handle(request, response) {
   if(request.method==='GET'&&pieces[0]==='api'&&pieces[1]==='attachments'&&pieces[2]){
     const message=await db.one('select attachment_path,attachment_type,attachment_name from public.messages where company_id=$1 and id=$2',[company,pieces[2]]);
     if(!message?.attachment_path)return json(response,404,{error:'Anexo não encontrado.'});
+    if(message.attachment_path.startsWith('meta:')){
+      const mediaId=message.attachment_path.slice(5);
+      if(!/^\d+$/.test(mediaId))return json(response,400,{error:'Mídia inválida.'});
+      const headers={authorization:`Bearer ${metaAccessToken()}`};
+      const metadata=await fetch(`https://graph.facebook.com/v${metaApiVersion()}/${mediaId}`,{headers,signal:AbortSignal.timeout(15000)});
+      if(!metadata.ok)return json(response,502,{error:'Mídia indisponível na Meta.'});
+      const info=await metadata.json(),target=new URL(info.url);
+      if(target.protocol!=='https:'||!/(^|\.)(facebook\.com|fbcdn\.net)$/.test(target.hostname))return json(response,502,{error:'Endereço de mídia inválido.'});
+      const file=await fetch(target,{headers,redirect:'error',signal:AbortSignal.timeout(30000)});
+      if(!file.ok)return json(response,502,{error:'Não foi possível baixar a mídia.'});
+      const bytes=Buffer.from(await file.arrayBuffer());
+      response.writeHead(200,{'content-type':info.mime_type||'application/octet-stream','content-length':bytes.length,'cache-control':'private, no-store','x-content-type-options':'nosniff'});
+      return response.end(bytes);
+    }
     const upstream=await fetch(`${supabaseUrl}/storage/v1/object/authenticated/chat-attachments/${message.attachment_path}`,{headers:{apikey:serviceKey,authorization:`Bearer ${serviceKey}`}});
     if(!upstream.ok)return json(response,upstream.status,{error:'Anexo indisponível.'});
     response.writeHead(200,{'content-type':message.attachment_type||'application/octet-stream','content-disposition':`inline; filename="${String(message.attachment_name||'arquivo').replace(/["\r\n]/g,'')}"`});
