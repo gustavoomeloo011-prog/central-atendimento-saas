@@ -1,4 +1,5 @@
 import { createSgpClient } from './sgp-client.mjs';
+import { validateAttachment, uploadMetaAttachment, mediaMessage, trustedMetaMediaUrl } from './meta-media.mjs';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -66,11 +67,12 @@ const metaAccessToken = () => process.env.META_ACCESS_TOKEN || process.env.META_
 const metaPhoneNumberId = () => process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.WHATSAPP_NUMBER_ID || '';
 const metaApiVersion = () => String(process.env.META_GRAPH_API_VERSION || process.env.META_API_VERSION || '25.0').replace(/^v/i,'');
 const metaApiConfigured = () => Boolean(metaAccessToken() && metaPhoneNumberId() && /^\d+\.\d+$/.test(metaApiVersion()));
-async function metaSendMessage({phone,text,options=[],nodeId='',flowVersionId='',replyTo}) {
+async function metaSendMessage({phone,text,options=[],nodeId='',flowVersionId='',replyTo,attachment}) {
   const token=metaAccessToken(),phoneNumberId=metaPhoneNumberId(),version=metaApiVersion();
   if(!token||!phoneNumberId||!/^\d+\.\d+$/.test(version))throw Object.assign(new Error('Cloud API não configurada: confira o token, Phone Number ID e versão da Graph API no ambiente do Render.'),{status:503});
   if(!/^55\d{10,11}$/.test(String(phone||'')))throw Object.assign(new Error('A Cloud API exige o telefone do contato no formato internacional E.164.'),{status:409});
-  const built=buildMetaMessage(phone,{text,options,nodeId,flowVersionId}),body=built.payload;
+  const media=attachment?.data?await uploadMetaAttachment(attachment,{token,phoneNumberId,version}):null;
+  const built=media?{payload:mediaMessage(phone,media,text),mode:media.kind}:buildMetaMessage(phone,{text,options,nodeId,flowVersionId}),body=built.payload;
   if(replyTo)body.context={message_id:String(replyTo)};
   let response;
   try{response=await fetch(`https://graph.facebook.com/v${version}/${phoneNumberId}/messages`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20_000)});}
@@ -82,12 +84,10 @@ async function metaSendMessage({phone,text,options=[],nodeId='',flowVersionId=''
   return {messageId,accepted:true,mode:built.mode};
 }
 const metaSendText = payload => metaSendMessage(payload);
-let currentAgentName = '';
 async function sendOnTransport(transport,company,payload){
-  const outgoingText=currentAgentName&&payload.text?`Atendente ${currentAgentName}:\n\n${String(payload.text).replace(/^[^:\n]{1,120}:\s*\n\s*\n/,'')}`:payload.text;
+  const outgoingText=payload.text;
   if(transport==='meta'){
-    if(payload.attachment?.data)throw Object.assign(new Error('Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'),{status:501});
-    return metaSendMessage({phone:payload.phone,text:outgoingText,replyTo:payload.reply?.provider_message_id});
+    return metaSendMessage({phone:payload.phone,text:outgoingText,attachment:payload.attachment,replyTo:payload.reply?.provider_message_id});
   }
   return connectorSend({...payload,text:outgoingText});
 }
@@ -100,6 +100,8 @@ async function deliverMetaOutbox(outboxId){
   });
   if(!item)return;
   try{
+    const active=await conversation(item.company_id,item.conversation_id);
+    if(active?.status==='open'&&active.human_started_at)throw new Error('Automação interrompida pelo atendimento humano.');
     const interactive=typeof item.interactive_payload==='string'?JSON.parse(item.interactive_payload||'{}'):(item.interactive_payload||{});
     if(isInteractiveWindowExpired(interactive))throw Object.assign(new Error('A janela de atendimento da Meta expirou; não foi enviada mensagem interativa.'),{status:409});
     const sent=await metaSendMessage({phone:item.to_phone,text:item.body,options:interactive.options||[],nodeId:interactive.nodeId||'',flowVersionId:interactive.flowVersionId||''});
@@ -117,18 +119,14 @@ async function deliverMetaOutbox(outboxId){
 }
 async function storeAttachment(company,conversationId,messageId,attachment) {
   if (!attachment?.data) return null;
-  const bytes=Buffer.from(String(attachment.data),'base64');
-  if (!bytes.length||bytes.length>10*1024*1024) throw Object.assign(new Error('O anexo deve possuir no máximo 10 MB.'),{status:400});
-  const type=String(attachment.type||'application/octet-stream');
-  if (!['image/jpeg','image/png','image/webp','video/mp4','application/pdf'].includes(type)) throw Object.assign(new Error('Formato de anexo não permitido.'),{status:400});
-  const extension=type==='image/jpeg'?'jpg':type==='image/png'?'png':type==='image/webp'?'webp':type==='video/mp4'?'mp4':'pdf';
+  const {bytes,type,extension}=validateAttachment(attachment);
   const path=`${company}/${conversationId}/${messageId}.${extension}`;
   const response=await fetch(`${supabaseUrl}/storage/v1/object/chat-attachments/${path}`,{method:'POST',headers:{apikey:serviceKey,authorization:`Bearer ${serviceKey}`,'content-type':type,'x-upsert':'false'},body:bytes});
   if(!response.ok)throw Object.assign(new Error('Não foi possível guardar o anexo.'),{status:502});
   return {path,name:String(attachment.name||`arquivo.${extension}`).slice(0,180),type};
 }
 async function executePublishedFlow(tx,company,c,input,initialVariables={}){
-  if(c.assigned_profile_id)return null;
+  if(c.assigned_profile_id || (c.status==='open' && c.human_started_at))return null;
   let run=await tx.one('select * from public.flow_runs where company_id=$1 and conversation_id=$2 for update',[company,c.id]);
   if(run?.status!=='active'&&run){
     if(c.status==='waiting'){
@@ -175,14 +173,13 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
 async function sendConversationNotice(company, selected, session, text, options=[]){
   const messageId=randomUUID();
   const agentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
-  currentAgentName=agentName;
   const bodyText=`Atendente ${agentName}:\n\n${text}`;
   await db.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'outbound','pending')",[messageId,company,selected.id,session.profile.id,bodyText]);
   try{
     const transport=selected.transport||await selectedTransport(company);
     const sent=transport==='meta'
       ? await metaSendMessage({phone:selected.contact_phone,text:bodyText,options,nodeId:'rating',flowVersionId:'system'})
-      : await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:selected.channel_address,text,correlation_id:messageId});
+      : await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:selected.channel_address,text:bodyText,correlation_id:messageId});
     await db.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);
   }catch(error){
     await db.query("update public.messages set delivery_status='failed',error_message=$1 where company_id=$2 and id=$3",[String(error.message||'Falha no envio').slice(0,500),company,messageId]);
@@ -235,6 +232,30 @@ async function handle(request, response) {
     await db.transaction(async tx => {
       for (const entry of entries) for (const change of (entry.changes || [])) {
         const value = change.value || {};
+        if(change.field==='smb_message_echoes')for(const echo of (value.message_echoes||[])){
+          const phone=String(echo.to||'').replace(/\D/g,'');
+          if(!phone||!echo.id)continue;
+          await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))',[`${company}:${phone}`]);
+          const claimed=await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,null,$4,now()) on conflict(event_id) do nothing returning event_id',[`echo:${echo.id}`,company,'meta.echo',echo]);
+          if(!claimed){duplicates++;continue;}
+          let c=await tx.one("select * from public.conversations where company_id=$1 and contact_phone=$2 and status<>'closed' order by updated_at desc limit 1 for update",[company,phone]);
+          if(!c){
+            const department=await tx.one('select id from public.departments where company_id=$1 order by id limit 1',[company]);
+            if(!department)throw new Error('Nenhuma fila disponível para registrar mensagem do celular.');
+            const protocol=(await tx.one('select public.next_protocol($1) protocol',[company])).protocol;
+            c=await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport,human_started_at) values($1,$2,$3,$4,$4,$5,'WhatsApp','open','normal',$3,$6,'meta',now()) returning *",[randomUUID(),company,department.id,phone,`${phone}@s.whatsapp.net`,protocol]);
+          }
+          if(c.transport && c.transport!=='meta')continue;
+          const saved=await tx.one("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'outbound',$5,'sent') on conflict(provider_message_id) do nothing returning id",[randomUUID(),company,c.id,echo.text?.body||'[Mensagem enviada pelo celular]',echo.id]);
+          if(!saved)continue;
+          const media=['image','audio','video','document','sticker'].includes(echo.type)?echo[echo.type]:null;
+          if(media?.id&&/^\d+$/.test(String(media.id)))await tx.query('update public.messages set attachment_path=$1,attachment_type=$2,attachment_name=$3 where company_id=$4 and id=$5',[`meta:${media.id}`,media.mime_type||'application/octet-stream',media.filename||echo.type,company,saved.id]);
+          await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,c.id]);
+          await tx.query("update public.conversations set status='open',human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+          await tx.query("update public.messages set delivery_status='failed',error_message='Automação interrompida pelo atendimento no celular.' where company_id=$1 and id in (select replace(idempotency_key,'meta-message:','') from public.whatsapp_outbox where company_id=$1 and conversation_id=$2 and status='pending')",[company,c.id]);
+          await tx.query("update public.whatsapp_outbox set status='failed',last_error='Atendimento assumido pelo celular.',updated_at=now() where company_id=$1 and conversation_id=$2 and status='pending'",[company,c.id]);
+          processed++;
+        }
         for (const status of (value.statuses || [])) {
           const eventId = `status:${status.id}:${status.status}`;
           const claimed = await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,null,$4,now()) on conflict (event_id) do nothing returning event_id', [eventId, company, 'meta.status', status]);
@@ -252,6 +273,7 @@ async function handle(request, response) {
           const media=['image','audio','video','document','sticker'].includes(message.type)?message[message.type]:null;
           const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
+          await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))',[`${company}:${phone}`]);
           const ratingValue=/^rating_[1-3]$/.test(String(inbound?.optionId||''))?Number(String(inbound.optionId).slice(-1)):Number(String(text).trim());
           if(Number.isInteger(ratingValue)&&ratingValue>=1&&ratingValue<=3){
             const rated=await tx.one("select c.id,c.protocol,null::text as closed_by_profile_id from public.conversations c left join public.conversation_ratings r on r.conversation_id=c.id where c.company_id=$1 and c.contact_phone=$2 and c.status='closed' and r.id is null and c.closed_at>now()-interval '24 hours' order by c.closed_at desc limit 1",[company,phone]);
@@ -399,7 +421,6 @@ async function handle(request, response) {
   if (request.method === 'POST' && url.pathname === '/api/internal/whatsapp/outbound') { if (!validConnector(request)) return json(response,401,{error:'Conector não autorizado.'}); const input=await body(request); const company=String(input.company_id||process.env.WHATSAPP_COMPANY_ID||''); if (company!==process.env.WHATSAPP_COMPANY_ID) return json(response,403,{error:'Empresa não autorizada.'}); const c=await conversation(company,String(input.conversation_id||'')); if (!c) return json(response,404,{error:'Conversa não encontrada.'}); const provider=String(input.message_id||'')||null; const existing=provider&&await db.one('select id from public.messages where provider_message_id=$1',[provider]); if (existing) return json(response,200,{ok:true,message_id:existing.id,delivery:'sent'}); const id=randomUUID(); await db.query('insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id) values($1,$2,$3,$4,$5,$6)',[id,company,c.id,String(input.body||''),'outbound',provider]); return json(response,201,{ok:true,message_id:id,delivery:'sent'}); }
   if(request.method==='POST'&&url.pathname==='/api/internal/whatsapp/delivery'){if(!validConnector(request))return json(response,401,{error:'Conector não autorizado.'});const input=await body(request),company=String(input.company_id||'');if(company!==process.env.WHATSAPP_COMPANY_ID)return json(response,403,{error:'Empresa não autorizada.'});const status=['sent','delivered','read'].includes(input.status)?input.status:'sent';await db.query('update public.messages set delivery_status=$1 where company_id=$2 and provider_message_id=$3',[status,company,String(input.message_id||'')]);return json(response,200,{ok:true});}
   const session=await sessionFor(request); if (!session) return json(response,401,{error:'Sessão expirada.'});
-  if(request.method==='POST'&&/\/api\/conversations\/[^/]+\/messages$/.test(url.pathname)) currentAgentName=String(session.profile.display_name||session.profile.name||'Atendente').trim();
   const company=session.profile.company_id, pieces=url.pathname.split('/').filter(Boolean);
   if(request.method==='GET'&&pieces[0]==='api'&&pieces[1]==='attachments'&&pieces[2]){
     const message=await db.one('select attachment_path,attachment_type,attachment_name from public.messages where company_id=$1 and id=$2',[company,pieces[2]]);
@@ -410,8 +431,8 @@ async function handle(request, response) {
       const headers={authorization:`Bearer ${metaAccessToken()}`};
       const metadata=await fetch(`https://graph.facebook.com/v${metaApiVersion()}/${mediaId}`,{headers,signal:AbortSignal.timeout(15000)});
       if(!metadata.ok)return json(response,502,{error:'Mídia indisponível na Meta.'});
-      const info=await metadata.json(),target=new URL(info.url);
-      if(target.protocol!=='https:'||!/(^|\.)(facebook\.com|fbcdn\.net)$/.test(target.hostname))return json(response,502,{error:'Endereço de mídia inválido.'});
+      const info=await metadata.json();
+      let target;try{target=trustedMetaMediaUrl(info.url);}catch{return json(response,502,{error:'Endereço de mídia inválido.'});}
       const file=await fetch(target,{headers,redirect:'error',signal:AbortSignal.timeout(30000)});
       if(!file.ok)return json(response,502,{error:'Não foi possível baixar a mídia.'});
       const bytes=Buffer.from(await file.arrayBuffer());
@@ -533,7 +554,7 @@ async function handle(request, response) {
   }
   if (pieces[0]!=='api'||pieces[1]!=='conversations'||!pieces[2]) return json(response,404,{error:'Rota não encontrada.'});
   const selected=await conversation(company,pieces[2]); if (!selected) return json(response,404,{error:'Conversa não encontrada.'}); const id=selected.id;
-    if (request.method==='GET'&&pieces.length===3) { const messages=await db.query("select m.*,case when m.direction='internal' then 'Nota interna' when m.direction='inbound' then 'Cliente' when m.profile_id is null then 'Atendimento automático' else coalesce(nullif(btrim(p.display_name),''),nullif(btrim(p.name),''),'Atendente') end author_name,to_char(m.created_at at time zone 'America/Sao_Paulo','HH24:MI') message_time,r.body reply_body from public.messages m left join public.profiles p on p.id=m.profile_id and p.company_id=m.company_id left join public.messages r on r.company_id=m.company_id and r.id=m.reply_to_id where m.company_id=$1 and m.conversation_id=$2 order by m.created_at",[company,id]); return json(response,200,{conversation:selected,messages}); }
+    if (request.method==='GET'&&pieces.length===3) { const messages=await db.query("select m.*,case when m.direction='internal' then 'Nota interna' when m.direction='inbound' then 'Cliente' when exists(select 1 from public.connector_events e where e.company_id=m.company_id and e.event_id='echo:'||m.provider_message_id and e.event_type='meta.echo') then 'Atendente pelo celular' when m.profile_id is null then 'Atendimento automático' else coalesce(nullif(btrim(p.display_name),''),nullif(btrim(p.name),''),'Atendente') end author_name,to_char(m.created_at at time zone 'America/Sao_Paulo','HH24:MI') message_time,r.body reply_body from public.messages m left join public.profiles p on p.id=m.profile_id and p.company_id=m.company_id left join public.messages r on r.company_id=m.company_id and r.id=m.reply_to_id where m.company_id=$1 and m.conversation_id=$2 order by m.created_at",[company,id]); return json(response,200,{conversation:selected,messages}); }
   if(request.method==='POST'&&pieces.length===4&&pieces[3]==='send-invoice'){
     const requestInput=await body(request);
     if(selected.status==='closed'||selected.assigned_profile_id!==session.profile.id)return json(response,409,{error:'Assuma um atendimento aberto antes de enviar a fatura.'});
@@ -551,13 +572,14 @@ async function handle(request, response) {
   if(request.method==='GET'&&pieces.length===4&&pieces[3]==='history'){ const history=await db.query("select c.id,c.protocol,c.status,c.created_at started_at,c.closed_at,c.department_id,d.name department_name,(select count(*)::int from public.messages m where m.company_id=c.company_id and m.conversation_id=c.id) message_count,(select body from public.messages m where m.company_id=c.company_id and m.conversation_id=c.id order by m.created_at desc limit 1) last_message from public.conversations c join public.departments d on d.id=c.department_id where c.company_id=$1 and c.contact_phone=$2 and c.id<>$3 order by c.created_at desc",[company,selected.contact_phone,id]); return json(response,200,{history}); }
   const action=pieces[3],input=await body(request);
   if(request.method==='POST'&&action==='messages'&&String(session.profile.display_name||'').trim().length<2)return json(response,409,{error:'Antes de enviar, configure seu nome de atendente em Configurações → Meu nome no atendimento.'});
-  if (request.method==='POST'&&action==='messages') { if(selected.status==='closed') return json(response,409,{error:'Este atendimento está encerrado e não aceita novas mensagens.'}); if(selected.assigned_profile_id!==session.profile.id) return json(response,409,{error:'Clique em Assumir atendimento antes de enviar mensagens.'}); const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const transport=selected.transport||await selectedTransport(company); if(transport==='meta'&&attachment?.data)return json(response,501,{error:'Envio de anexos pela Cloud API ainda não está habilitado. Selecione Baileys ou envie uma mensagem de texto.'}); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const outboundText=text?`${String(selected.contact_name||'Cliente').trim()}:\n\n${text}`:text; const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,outboundText,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$1 and company_id=$2",[id,company]);}); try{const sent=await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:channelAddress,text:outboundText,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent',transport});}catch(error){await db.query("update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4",[error.uncertain?'unknown':'failed',String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
+  if (request.method==='POST'&&action==='messages') { if(selected.status==='closed') return json(response,409,{error:'Este atendimento está encerrado e não aceita novas mensagens.'}); if(selected.assigned_profile_id!==session.profile.id) return json(response,409,{error:'Clique em Assumir atendimento antes de enviar mensagens.'}); const text=String(input.body||'').trim(),attachment=input.attachment||null; if (!text&&!attachment?.data) return json(response,400,{error:'Escreva uma mensagem ou anexe um arquivo.'}); const channelAddress=String(selected.channel_address||''); if(!/^55\d{10,11}$/.test(String(selected.contact_phone||''))&&!/@(?:s\.whatsapp\.net|lid)$/i.test(channelAddress))return json(response,409,{error:'Confirme o identificador do WhatsApp antes de enviar.'}); const transport=selected.transport||await selectedTransport(company); const reply=input.reply_to_id?await db.one('select id,body,provider_message_id from public.messages where company_id=$1 and conversation_id=$2 and id=$3',[company,id,input.reply_to_id]):null; const messageId=randomUUID(); const outboundText=text?`Atendente ${String(session.profile.display_name||session.profile.name||'Atendente').trim()}:\n\n${text}`:text; const stored=await storeAttachment(company,id,messageId,attachment); await db.transaction(async tx=>{await tx.query("update public.flow_runs set status='paused',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,reply_to_id,attachment_path,attachment_name,attachment_type,delivery_status) values($1,$2,$3,$4,$5,'outbound',$6,$7,$8,$9,'pending')",[messageId,company,id,session.profile.id,outboundText,reply?.id||null,stored?.path||null,stored?.name||null,stored?.type||null]);await tx.query("update public.conversations set status='open',updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$1 and company_id=$2",[id,company]);}); try{const sent=await sendOnTransport(transport,company,{phone:selected.contact_phone,jid:channelAddress,text:outboundText,correlation_id:messageId,attachment,reply:reply?{body:reply.body,provider_message_id:reply.provider_message_id}:null});await db.transaction(async tx=>{await tx.query("update public.messages set provider_message_id=$1,delivery_status='sent',error_message=null where company_id=$2 and id=$3",[sent.messageId||null,company,messageId]);await audit(tx,session,'message_sent',id);});return json(response,201,{ok:true,message_id:messageId,provider_message_id:sent.messageId||null,status:'sent',transport});}catch(error){await db.query("update public.messages set delivery_status=$1,error_message=$2 where company_id=$3 and id=$4",[error.uncertain?'unknown':'failed',String(error.message||'Falha no envio').slice(0,500),company,messageId]);throw error;} }
   if(request.method==='POST'&&action==='internal-notes'){const text=String(input.body||'').trim();if(!text)return json(response,400,{error:'Escreva a anotação interna.'});const noteId=randomUUID();await db.transaction(async tx=>{await tx.query("insert into public.messages(id,company_id,conversation_id,profile_id,body,direction,delivery_status) values($1,$2,$3,$4,$5,'internal','internal')",[noteId,company,id,session.profile.id,text]);await tx.query('insert into public.internal_notes(id,company_id,conversation_id,profile_id,body) values($1,$2,$3,$4,$5)',[noteId,company,id,session.profile.id,text]);await audit(tx,session,'internal_note_created',id);});return json(response,201,{ok:true});}
   if(request.method==='PATCH'&&action==='contact'){const name=String(input.name||'').trim(),raw=String(input.phone||selected.contact_phone||'').replace(/\D/g,''),phone=raw.length===10||raw.length===11?'55'+raw:raw;if(!name)return json(response,400,{error:'Informe o nome do contato.'});if(!/^55\d{10,11}$/.test(phone))return json(response,400,{error:'Informe DDD e número válidos.'});await db.query('update public.conversations set contact_name=$1,contact_phone=$2,channel_address=$3,updated_at=now() where company_id=$4 and id=$5',[name.slice(0,120),phone,phone+'@s.whatsapp.net',company,id]);return json(response,200,{ok:true});}
   if (request.method==='POST'&&action==='simulate') { const text=String(input.body||'').trim(); if (!text) return json(response,400,{error:'Escreva a mensagem simulada.'}); await db.transaction(async tx=>{ const c=await tx.one('select * from public.conversations where id=$1 and company_id=$2 for update',[id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,text,'inbound']); if (c.assigned_profile_id) return; const graphReply=await executePublishedFlow(tx,company,c,text); if(graphReply){if(graphReply.reply)await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,graphReply.reply,'outbound']);return;} const settings=await tx.one('select * from public.automation_settings where company_id=$1',[company]); if (!settings) return; const attempts=c.bot_attempts+1,financial=/financeiro|fatura|segunda via|boleto/i.test(text),queued=financial||attempts>=settings.max_attempts; const target=financial?await tx.one("select id from public.departments where company_id=$1 and name ilike '%financeiro%' limit 1",[company]):null; await tx.query("update public.conversations set department_id=$1,status=$2,bot_attempts=$3,human_started_at=case when $2='waiting' then coalesce(human_started_at,now()) else human_started_at end,updated_at=now() where id=$4 and company_id=$5",[target?.id||c.department_id,queued?'waiting':'open',attempts,id,company]); await tx.query('insert into public.messages(id,company_id,conversation_id,body,direction) values($1,$2,$3,$4,$5)',[randomUUID(),company,id,queued?settings.fallback_message:settings.welcome_message,'outbound']); await audit(tx,session,queued?'bot_queued':'bot_replied',id); }); return json(response,201,{ok:true}); }
   if (request.method==='POST'&&['assume','close','transfer'].includes(action)) {
     const result=await db.transaction(async tx=>{
       const c=await tx.one('select * from public.conversations where company_id=$1 and id=$2 for update',[company,id]);
+      if(action==='close'&&c.status==='closed')return {ok:true,already_closed:true};
       if(action==='assume'||action==='close')await tx.query('update public.flow_runs set status=$1,updated_at=now() where company_id=$2 and conversation_id=$3',[action==='close'?'finished':'paused',company,id]);
       if(action==='assume')await tx.query("update public.conversations set assigned_profile_id=$1,status='open',closed_at=null,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company]);
       if(action==='close'){
@@ -574,9 +596,10 @@ async function handle(request, response) {
       return {ok:true,conversation:c};
     });
     if(result.error)return json(response,400,result);
+    if(result.already_closed)return json(response,200,{ok:true,already_closed:true});
     try{
       if(action==='assume')await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
-      if(action==='close')await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento:',[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]);
+      if(action==='close'&&input.send_survey===true)await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento:',[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]);
     }catch(error){return json(response,200,{ok:true,warning:'Atendimento encerrado, mas a mensagem automática não pôde ser enviada agora.'});}
     return json(response,200,{ok:true});
   }
