@@ -23,21 +23,21 @@ export function customerSummary(customer) {
         signalMeasuredAt: null, source: 'SGP — último sinal armazenado' })) }))
   };
 }
-export function createSgpClient({ env = process.env, fetcher = fetch, clock = Date.now } = {}) {
+export function createSgpClient({ env = process.env, fetcher = fetch, clock = Date.now, configProvider = async () => ({}) } = {}) {
   const cache = new Map(), pending = new Map();
   let active = 0;
-  async function request(path, values, json = false) {
-    const base = new URL(env.SGP_BASE_URL);
+  async function request(path, values, json = false, cfg = env) {
+    const base = new URL(cfg.SGP_BASE_URL);
     if (base.protocol !== 'https:' || base.username || base.password) throw Error('Configuração SGP inválida.');
-    const headers = { Accept: 'application/json', Authorization: 'Basic ' + Buffer.from(env.SGP_USERNAME + ':' + env.SGP_PASSWORD).toString('base64') };
+    const headers = { Accept: 'application/json', Authorization: 'Basic ' + Buffer.from(cfg.SGP_USERNAME + ':' + cfg.SGP_PASSWORD).toString('base64') };
     if (json) headers['Content-Type'] = 'application/json';
     const response = await fetcher(new URL(path, base), { method: 'POST', headers,
       body: json ? JSON.stringify(values) : new URLSearchParams(values), redirect: 'error', signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw Error('Consulta SGP recusada (HTTP ' + response.status + ').');
     try { return await response.json(); } catch { throw Error('O SGP retornou uma resposta inválida.'); }
   }
-  async function load(phone) {
-    const payload = await request('/api/ura/clientes/', { telefone: phone, limit: '20', exibir_conexao: 'true' });
+  async function load(phone, cfg) {
+    const payload = await request('/api/ura/clientes/', { telefone: phone, limit: '20', exibir_conexao: 'true' }, false, cfg);
     if (!Array.isArray(payload.clientes)) throw Error('O SGP não retornou a lista de clientes esperada.');
     // Verify the phone ourselves, even if the upstream ignores its filter.
     const matches = payload.clientes.filter(c => [...(c.contatos?.telefones || []), ...(c.contatos?.celulares || [])].some(p => nationalPhone(p) === phone));
@@ -51,7 +51,7 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
         if (service.tipo !== 'internet' || !service.login) continue;
         const summary = result.contracts[ci].services[si];
         try {
-          const radius = await request('/ws/radius/radacct/list/all/', { username: service.login, last_session: true, limit: 1 }, true);
+          const radius = await request('/ws/radius/radacct/list/all/', { username: service.login, last_session: true, limit: 1 }, true, cfg);
           const row = radius.result?.find(r => r.pppoe_login === service.login);
           summary.online = typeof row?.online === 'boolean' ? row.online : null;
         } catch { summary.connectionError = 'Estado de conexão indisponível.'; }
@@ -59,11 +59,11 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     }
     return { status: 'found', customer: result, checkedAt: new Date(clock()).toISOString() };
   }
-  async function invoiceDocument(invoiceId) {
+  async function invoiceDocument(invoiceId, cfg) {
     const id=String(invoiceId||'').trim();
     if(!/^\d+$/.test(id))throw Error('Identificador de fatura inválido.');
-    const base=new URL(env.SGP_BASE_URL),url=new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(id),base);
-    let response=await fetcher(url,{headers:{Accept:'text/html,application/xhtml+xml',Authorization:'Basic '+Buffer.from(env.SGP_USERNAME+':'+env.SGP_PASSWORD).toString('base64')},redirect:'follow',signal:AbortSignal.timeout(15000)});
+    const base=new URL(cfg.SGP_BASE_URL),url=new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(id),base);
+    let response=await fetcher(url,{headers:{Accept:'text/html,application/xhtml+xml',Authorization:'Basic '+Buffer.from(cfg.SGP_USERNAME+':'+cfg.SGP_PASSWORD).toString('base64')},redirect:'follow',signal:AbortSignal.timeout(15000)});
     if(response.ok&&/\/accounts\/login/i.test(response.url)){
       const loginUrl=new URL('/accounts/login/',base),jar=new Map();
       const capture=r=>{for(const value of r.headers.getSetCookie()){const pair=value.split(';')[0],at=pair.indexOf('=');jar.set(pair.slice(0,at),pair.slice(at+1));}};
@@ -71,7 +71,7 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
       const login=await fetcher(loginUrl,{redirect:'manual',signal:AbortSignal.timeout(15000)});capture(login);
       const html=await login.text(),csrf=html.match(/name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)/)?.[1]||jar.get('csrftoken');
       if(!csrf)throw Error('Não foi possível iniciar a sessão SGP.');
-      const authenticated=await fetcher(loginUrl,{method:'POST',headers:{Cookie:cookies(),Referer:loginUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({username:env.SGP_USERNAME,password:env.SGP_PASSWORD,csrfmiddlewaretoken:csrf,next:'/admin/'}),redirect:'manual',signal:AbortSignal.timeout(15000)});capture(authenticated);
+      const authenticated=await fetcher(loginUrl,{method:'POST',headers:{Cookie:cookies(),Referer:loginUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({username:cfg.SGP_USERNAME,password:cfg.SGP_PASSWORD,csrfmiddlewaretoken:csrf,next:'/admin/'}),redirect:'manual',signal:AbortSignal.timeout(15000)});capture(authenticated);
       if(![302,303].includes(authenticated.status))throw Error('O SGP recusou o login para consultar o boleto.');
       response=await fetcher(url,{headers:{Cookie:cookies(),Accept:'text/html'},redirect:'manual',signal:AbortSignal.timeout(15000)});
     }
@@ -80,10 +80,11 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
     return {invoiceId:id,barcode:line?.raw||null,link:url.toString()};
   }
-  return { async invoice(companyId, invoiceId) { if (!env.SGP_COMPANY_ID || companyId !== env.SGP_COMPANY_ID) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId); }, async lookup(companyId, value) {
+  return { async invoice(companyId, invoiceId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId,cfg); }, async lookup(companyId, value) {
     // A global integration belongs exclusively to its explicitly configured tenant.
-    if (!env.SGP_COMPANY_ID || companyId !== env.SGP_COMPANY_ID) return { status: 'not_configured' };
-    if (!env.SGP_BASE_URL || !env.SGP_USERNAME || !env.SGP_PASSWORD) return { status: 'not_configured' };
+    const custom=await configProvider(companyId),cfg={...env,...custom};
+    if (env.SGP_COMPANY_ID && !custom.SGP_BASE_URL && companyId !== env.SGP_COMPANY_ID) return { status: 'not_configured' };
+    if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) return { status: 'not_configured' };
     const phone = nationalPhone(value);
     if (!phone) return { status: 'invalid_phone' };
     const key = companyId + ':' + phone, cached = cache.get(key);
@@ -91,7 +92,7 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     if (pending.has(key)) return pending.get(key);
     if (active >= 4) return { status: 'unavailable', message: 'Consultas SGP ocupadas. Tente novamente em instantes.' };
     active++;
-    const job = load(phone).catch(error => ({ status: 'unavailable', message: /^Consulta SGP recusada/.test(error.message) ? error.message : 'Não foi possível consultar o SGP agora.' })).then(value => {
+    const job = load(phone,cfg).catch(error => ({ status: 'unavailable', message: /^Consulta SGP recusada/.test(error.message) ? error.message : 'Não foi possível consultar o SGP agora.' })).then(value => {
       if (cache.size >= 500) cache.delete(cache.keys().next().value);
       cache.set(key, { value, until: clock() + (value.status === 'unavailable' ? 10000 : 60000) });
       return value;
