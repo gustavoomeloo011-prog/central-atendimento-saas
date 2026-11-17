@@ -51,6 +51,10 @@ async function sessionFor(request) {
   const user = await authRequest('user', 'GET', null, anonKey, token).catch(() => null);
   if (!user?.id) return null;
   const profile = await db.one('select id,company_id,name,email,role,status,display_name,avatar_url,phone,department_id,created_at,last_seen_at from public.profiles where auth_user_id=$1', [user.id]);
+  if (profile && profile.role === 'superadmin' && request.headers['x-company-id']) {
+    const selected = await db.one('select id from public.companies where id=$1 and enabled_modules is not null',[String(request.headers['x-company-id'])]).catch(()=>null);
+    if (selected) profile.company_id = selected.id;
+  }
   return profile ? { profile, user } : null;
 }
 const admin = session => ['supervisor','company_admin','superadmin'].includes(session.profile.role);
@@ -345,7 +349,7 @@ async function handle(request, response) {
     const auth = await authRequest('token?grant_type=password','POST',{email,password});
     const profile = await db.one('select id,company_id,name,role from public.profiles where auth_user_id=$1',[auth.user.id]);
     if (!profile) return json(response,403,{error:'Usuário não vinculado a uma empresa.'});
-    return json(response,200,{token:auth.access_token,profile});
+    return json(response,200,{token:auth.access_token,profile,globalAdmin:profile.role==='superadmin'});
   }
   if (request.method === 'POST' && url.pathname === '/api/recover-password') {
     const input=await body(request),email=String(input.email||'').trim().toLowerCase();
@@ -440,6 +444,15 @@ async function handle(request, response) {
   if(request.method==='POST'&&url.pathname==='/api/internal/whatsapp/delivery'){if(!validConnector(request))return json(response,401,{error:'Conector não autorizado.'});const input=await body(request),company=String(input.company_id||'');if(company!==process.env.WHATSAPP_COMPANY_ID)return json(response,403,{error:'Empresa não autorizada.'});const status=['sent','delivered','read'].includes(input.status)?input.status:'sent';await db.query('update public.messages set delivery_status=$1 where company_id=$2 and provider_message_id=$3',[status,company,String(input.message_id||'')]);return json(response,200,{ok:true});}
   const session=await sessionFor(request); if (!session) return json(response,401,{error:'Sessão expirada.'});
   const company=session.profile.company_id, pieces=url.pathname.split('/').filter(Boolean);
+  if (url.pathname === '/api/admin/companies' && session.profile.role === 'superadmin') {
+    if (request.method === 'GET') return json(response,200,{companies:await db.query('select id,name,kind,enabled_modules,created_at from public.companies order by name')});
+    const input=await body(request),name=String(input.name||'').trim(),id=String(input.id||name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')).slice(0,60),kind=input.kind==='general'?'general':'isp';
+    if(!name||!id)return json(response,400,{error:'Informe nome e identificador da empresa.'});
+    const saved=await db.one('insert into public.companies(id,name,kind) values($1,$2,$3) returning id,name,kind,enabled_modules,created_at',[id,name,kind]);
+    await db.query("insert into public.automation_settings(company_id,welcome_message,fallback_message,max_attempts) values($1,'Olá! Como podemos ajudar?','Vou encaminhar você para nossa equipe.',2) on conflict(company_id) do nothing",[id]);
+    await db.query("insert into public.departments(id,company_id,name) values($1,$2,'Geral') on conflict(id) do nothing",[id+'-general',id]);
+    return json(response,201,{company:saved});
+  }
   if(request.method==='GET'&&pieces[0]==='api'&&pieces[1]==='attachments'&&pieces[2]){
     const message=await db.one('select attachment_path,attachment_type,attachment_name from public.messages where company_id=$1 and id=$2',[company,pieces[2]]);
     if(!message?.attachment_path)return json(response,404,{error:'Anexo não encontrado.'});

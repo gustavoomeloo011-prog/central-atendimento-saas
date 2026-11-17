@@ -5,7 +5,7 @@ import { showFlowEditor } from './flow-editor.js';
 import { mediaKind, visibleMessageBody, captureScroll, restoreScroll, followMediaLayout } from './chat-view.js';
 import { conversationTags } from './conversation-tags.js';
 const app = document.querySelector('#app');
-document.title = 'Atendimento SG Fibra';
+document.title = 'FlowChat';
 const versionBadge=document.createElement('small');
 versionBadge.className='deploymentVersion';
 versionBadge.textContent='Versão: consultando…';
@@ -15,6 +15,7 @@ fetch('/api/version',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return 
   versionBadge.title=commit?'Commit em execução no Render: '+commit:'Commit do Render não disponível neste ambiente.';
 }).catch(()=>{versionBadge.textContent='Versão · indisponível';});
 let token = localStorage.getItem('central_token');
+let selectedCompany = localStorage.getItem('flowchat_company') || '';
 setInterval(()=>{fetch('/health',{cache:'no-store'}).catch(()=>{});},600000);
 const mediaObjects=new Map();
 let mediaDownloads=0;
@@ -100,7 +101,7 @@ function renderConversationTags(row){return conversationTags(row,sgpData.get(row
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
     ...options,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}), ...(options.headers || {}) }
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}), ...(selectedCompany ? {'x-company-id':selectedCompany} : {}), ...(options.headers || {}) }
   });
   const data = await response.json();
   if (!response.ok) throw Error(data.error || 'Falha na operação.');
@@ -126,7 +127,7 @@ function login() {
       const login = await api('/api/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
       token = login.token;
       localStorage.setItem('central_token', token);
-      boot();
+      if(login.globalAdmin){ currentView='admin-companies'; await adminCompanies(); } else { selectedCompany=''; localStorage.removeItem('flowchat_company'); boot(); }
     } catch (error) { alert(error.message); }
   };
 }
@@ -153,6 +154,17 @@ async function boot() {
     token = null;
     login();
   }
+}
+
+async function adminCompanies() {
+  currentView='admin-companies';
+  try {
+    const data=await api('/api/admin/companies');
+    app.innerHTML='<section class="settings"><div class="settingsHead"><div><h2>FlowChat</h2><p class="muted">Administração global de empresas</p></div><button class="btn subtle" id="adminLogout">Sair</button></div><div class="settingsGrid"><article class="card"><h3>Empresas cadastradas</h3><div id="companyCards">'+data.companies.map(c=>'<button class="card companyCard" data-company="'+esc(c.id)+'"><h3>'+esc(c.name)+'</h3><p class="muted">FlowChat · '+esc(c.kind==='isp'?'Provedor':'Empresa')+'</p><span class="btn">Abrir empresa</span></button>').join('')+'</div></article><form class="card" id="newCompany"><h3>Nova empresa</h3><label class="field">Nome<input name="name" required placeholder="Ex.: Empresa Exemplo"></label><label class="field">Identificador<input name="id" placeholder="empresa-exemplo"></label><label class="field">Tipo<select name="kind"><option value="isp">Provedor / ISP</option><option value="general">Empresa geral</option></select></label><button class="btn">Cadastrar empresa</button></form></div></section>';
+    document.querySelectorAll('[data-company]').forEach(card=>card.onclick=()=>{selectedCompany=card.dataset.company;localStorage.setItem('flowchat_company',selectedCompany);boot();});
+    document.querySelector('#adminLogout').onclick=()=>{localStorage.removeItem('central_token');localStorage.removeItem('flowchat_company');token=null;selectedCompany='';login();};
+    document.querySelector('#newCompany').onsubmit=async event=>{event.preventDefault();try{await api('/api/admin/companies',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(event.target)))});await adminCompanies();}catch(error){alert(error.message);}};
+  } catch(error) { alert(error.message); login(); }
 }
 
 async function refreshLive() {
