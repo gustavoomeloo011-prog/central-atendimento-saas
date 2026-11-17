@@ -2,13 +2,41 @@ const attendanceLabel = value => ({waiting:'Aguardando',open:'Em atendimento',cl
 import { inQueue } from './queues.js';
 import { renderSgp } from './sgp-panel.js';
 import { showFlowEditor } from './flow-editor.js';
-import { mediaKind, captureScroll, restoreScroll, followMediaLayout } from './chat-view.js';
+import { mediaKind, visibleMessageBody, captureScroll, restoreScroll, followMediaLayout } from './chat-view.js';
 import { conversationTags } from './conversation-tags.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
 let token = localStorage.getItem('central_token');
 setInterval(()=>{fetch('/health',{cache:'no-store'}).catch(()=>{});},600000);
 const mediaObjects=new Map();
+let mediaDownloads=0;
+const mediaWaiters=[];
+async function loadMediaBlob(source){
+  if(mediaDownloads>=3)await new Promise(resolve=>mediaWaiters.push(resolve));
+  else mediaDownloads++;
+  try{
+    const result=await fetch(source,{headers:{authorization:'Bearer '+token},signal:AbortSignal.timeout(60000)});
+    if(!result.ok){const error=await result.json().catch(()=>({}));throw Error(error.error||'Mídia indisponível.');}
+    return await result.blob();
+  }finally{const next=mediaWaiters.shift();if(next)next();else mediaDownloads--;}
+}
+async function showAttachment(id,name='Arquivo'){
+  const dialog=document.createElement('dialog');dialog.className='mediaDialog';
+  dialog.innerHTML='<header><b></b><button class="btn subtle" type="button">Fechar</button></header><div class="mediaDialogBody">Carregando…</div>';
+  dialog.querySelector('b').textContent=name;
+  dialog.querySelector('button').onclick=()=>dialog.close();
+  document.body.appendChild(dialog);dialog.showModal();let objectUrl;
+  dialog.addEventListener('close',()=>{if(objectUrl)URL.revokeObjectURL(objectUrl);dialog.remove();});
+  try{
+    const blob=await loadMediaBlob('/api/attachments/'+encodeURIComponent(id));
+    if(!dialog.isConnected)return;
+    objectUrl=URL.createObjectURL(blob);
+    const body=dialog.querySelector('.mediaDialogBody');body.replaceChildren();
+    if(blob.type.startsWith('image/')){const img=document.createElement('img');img.src=objectUrl;img.alt=name;body.appendChild(img);}
+    else if(blob.type.split(';')[0]==='application/pdf'){const frame=document.createElement('iframe');frame.src=objectUrl;frame.title=name;body.appendChild(frame);}
+    const download=document.createElement('a');download.className='btn';download.href=objectUrl;download.download=name;download.textContent='Baixar arquivo original';body.appendChild(download);
+  }catch(error){if(dialog.isConnected)dialog.querySelector('.mediaDialogBody').textContent=error.message;}
+}
 new MutationObserver(()=>{
   for(const [element,url] of mediaObjects)if(!element.isConnected){URL.revokeObjectURL(url);mediaObjects.delete(element);}
   document.querySelectorAll('.messageMedia:not([data-loaded])').forEach(async element=>{
@@ -16,12 +44,11 @@ new MutationObserver(()=>{
     const source=element.getAttribute('data-media-src');
     if(!source)return;
     try{
-      const result=await fetch(source,{headers:{authorization:'Bearer '+token}});
-      if(!result.ok)throw Error('Mídia indisponível');
-      const blob=await result.blob();if(!element.isConnected)return;
+      const blob=await loadMediaBlob(source);if(!element.isConnected)return;
       const url=URL.createObjectURL(blob);mediaObjects.set(element,url);followMediaLayout(element);element.src=url;
       element.style.maxWidth='100%';element.style.maxHeight='320px';
-    }catch{element.insertAdjacentText('afterend',' Mídia indisponível. Abra novamente a conversa para tentar.');}
+      if(element.tagName==='IMG')element.onclick=event=>{event.stopPropagation();showAttachment(source.split('/').pop(),element.alt||'Imagem');};
+    }catch(error){if(!element.isConnected)return;const retry=document.createElement('button');retry.className='attachment mediaRetry';retry.textContent='Tentar carregar novamente';retry.title=error.message;retry.onclick=event=>{event.stopPropagation();delete element.dataset.loaded;retry.remove();};element.after(retry);}
   });
 }).observe(app,{childList:true,subtree:true});
 let state = {};
@@ -128,8 +155,8 @@ async function refreshLive() {
     const next = await api('/api/bootstrap');
     const detail = activeId ? await api('/api/conversations/' + activeId) : null;
     if (currentView !== 'inbox' || requestedId!==activeId || requestedMode!==inboxMode) return;
-    const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message,item.weekly_contacts,item.reported_slow,item.robot_facts]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
-    const after = JSON.stringify([(next.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message,item.weekly_contacts,item.reported_slow,item.robot_facts]),(detail?.messages||[]).map(item=>[item.id,item.delivery_status])]);
+    const before = JSON.stringify([(state.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message,item.weekly_contacts,item.reported_slow,item.robot_facts]),(state.detail?.messages||[]).map(item=>[item.id,item.delivery_status,item.body,item.attachment_path,item.edited])]);
+    const after = JSON.stringify([(next.conversations||[]).map(item=>[item.id,item.updated_at,item.last_message,item.weekly_contacts,item.reported_slow,item.robot_facts]),(detail?.messages||[]).map(item=>[item.id,item.delivery_status,item.body,item.attachment_path,item.edited])]);
     if (before !== after || (inboxMode === 'closed' && document.querySelector('.list'))) { state = {...next,detail}; render(); }
   } catch {}
 }
@@ -148,8 +175,8 @@ function messageHtml(message) {
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
   const author = internal ? 'Nota interna' : robot ? 'Robô SG Fibra' : message.direction === 'inbound' ? 'Cliente' : (message.author_name || 'Atendente');
-  const cleanBody=message.direction==='outbound'&&!robot?String(message.body||'').replace(/^[^:\n]{1,120}:\s*\n\s*\n/,''):String(message.body||'');
-  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : 'inbound ') + (robot ? 'robot ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + (robot ? '<span class="authorIcon">🤖</span>' : internal ? '<span class="authorIcon">▣</span>' : '') + esc(author) + '</b>' + reply + '<div>' + esc(cleanBody) + '</div>' + attachment + (message.delivery_status==='failed'?'<p class="sendFailure" role="status">Não enviada: '+esc(message.error_message||'Falha no envio')+'</p>':'') + '<small>' + esc(message.message_time || '') + status + (internal ? ' · somente equipe' : '') + '</small></div>';
+  const cleanBody=message.direction==='outbound'&&!robot?visibleMessageBody(message).replace(/^[^:\n]{1,120}:\s*\n\s*\n/,''):visibleMessageBody(message);
+  return '<div class="message ' + (message.direction === 'outbound' ? 'outbound ' : 'inbound ') + (robot ? 'robot ' : '') + (internal ? 'internal' : '') + '" data-message-id="' + esc(message.id) + '" title="' + esc(message.error_message||'') + '"><b class="messageAuthor">' + (robot ? '<span class="authorIcon">🤖</span>' : internal ? '<span class="authorIcon">▣</span>' : '') + esc(author) + '</b>' + reply + '<div>' + esc(cleanBody) + '</div>' + attachment + (message.delivery_status==='failed'?'<p class="sendFailure" role="status">Não enviada: '+esc(message.error_message||'Falha no envio')+'</p>':'') + '<small>' + esc(message.message_time || '') + status + (message.edited?' · editada':'') + (internal ? ' · somente equipe' : '') + '</small></div>';
 }
 
 async function showConversationHistory(conversation) {
@@ -169,7 +196,7 @@ async function showConversationHistory(conversation) {
         const item=history.find(row=>row.id===button.dataset.historyId);
         body.innerHTML='<button class="btn subtle" id="historyBack">← Todos os atendimentos</button><p><b>'+esc(item?.protocol||'Sem protocolo')+'</b> · '+esc(item?.department_name||'Sem fila')+' · '+esc(item?.started_at?new Date(item.started_at).toLocaleString('pt-BR'):'')+'</p><div class="historyThread" id="historyThread">'+(detail.messages||[]).map(messageHtml).join('')+'</div>';
         document.querySelector('#historyBack').onclick=()=>showConversationHistory(conversation);
-        document.querySelectorAll('#historyThread [data-attachment]').forEach(link=>link.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+link.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
+        document.querySelectorAll('#historyThread [data-attachment]').forEach(link=>link.onclick=event=>{event.stopPropagation();showAttachment(link.dataset.attachment,link.textContent.replace('📎','').trim());});
         const thread=document.querySelector('#historyThread');thread.scrollTop=thread.scrollHeight;
       }catch(error){body.innerHTML='<p role="alert">'+esc(error.message||'Não foi possível abrir a conversa.')+'</p><button class="btn subtle" id="historyBack">← Voltar</button>';document.querySelector('#historyBack').onclick=()=>showConversationHistory(conversation);}
     });
@@ -352,7 +379,7 @@ function bindConversation(conversation) {
   bindInvoiceButtons(conversation.id);
   const oldToggle=document.querySelector('#toggleClientPanel');
   if(oldToggle){ const panel=document.querySelector('.clientPanel'); const title=panel?.querySelector('.panelTitle'); if(clientPanelOpen){ oldToggle.remove(); if(title&&!title.querySelector('.clientPanelToggle')){ const button=document.createElement('button'); button.className='iconButton clientPanelToggle'; button.type='button'; button.title='Ocultar dados do cliente'; button.textContent='×'; button.onclick=()=>{clientPanelOpen=false;localStorage.setItem('central_client_panel','0');render();}; title.appendChild(button); } } else { oldToggle.textContent='▣ Mostrar dados'; oldToggle.title='Mostrar dados do cliente'; oldToggle.style.display='inline-flex'; oldToggle.onclick=()=>{clientPanelOpen=true;localStorage.setItem('central_client_panel','1');render();}; } }
-  document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=async event=>{event.stopPropagation();try{const response=await fetch('/api/attachments/'+button.dataset.attachment,{headers:{authorization:'Bearer '+token}});if(!response.ok)throw Error('Anexo indisponível.');const blob=await response.blob(),url=URL.createObjectURL(blob);window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){alert(error.message);}});
+  document.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=event=>{event.stopPropagation();showAttachment(button.dataset.attachment,button.textContent.replace('📎','').trim());});
   document.querySelectorAll('.message[data-message-id]').forEach(element => element.onclick = event => { if (event.target.closest('[data-attachment],.messageMedia')) return; const message = state.detail?.messages?.find(item => item.id === element.dataset.messageId); if (message?.direction !== 'internal') { replyTo = {id:message.id,body:message.body||message.attachment_name||'Anexo'}; render(); } });
   if (document.querySelector('#cancelReply')) document.querySelector('#cancelReply').onclick = () => { replyTo = null; render(); };
   document.querySelector('#renameContact').onclick = async () => { const name=prompt('Nome do contato',conversation.contact_name); if(!name)return; const phone=prompt('DDD + número do WhatsApp',String(conversation.contact_phone||'').replace(/^55/,''));if(!phone)return;try{await api('/api/conversations/'+conversation.id+'/contact',{method:'PATCH',body:JSON.stringify({name,phone})});await boot();await openConversation(conversation.id);}catch(error){alert(error.message);} };

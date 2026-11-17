@@ -1,5 +1,6 @@
 import { createSgpClient } from './sgp-client.mjs';
 import { startIdleSweep } from './idle-conversations.mjs';
+import { parseMetaEdit, applyStoredMetaEdit, recoverStoredMetaEdits } from './meta-edits.mjs';
 import { validateAttachment, uploadMetaAttachment, mediaMessage, trustedMetaMediaUrl } from './meta-media.mjs';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -270,9 +271,14 @@ async function handle(request, response) {
           const claimed = await tx.one('insert into public.connector_events(event_id,company_id,event_type,provider_message_id,payload,processed_at) values($1,$2,$3,$4,$5,now()) on conflict (event_id) do nothing returning event_id', [`message:${providerId}`, company, 'meta.message', providerId, message]);
           if (!claimed) { duplicates++; continue; }
           const phone = String(message.from || '').replace(/\D/g, '');
+          if(message.type==='edit'){
+            const edit=parseMetaEdit(message);
+            if(edit)await applyStoredMetaEdit(tx,company,edit.originalId);
+            processed++;continue;
+          }
           const inbound=parseMetaInbound(message);
           const media=['image','audio','video','document','sticker'].includes(message.type)?message[message.type]:null;
-          const text=inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
+          const text=media?.caption||inbound?.displayText||`[Mensagem ${message.type||'não suportada'}]`;
           if (!phone || !text) continue;
           await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))',[`${company}:${phone}`]);
           const ratingValue=/^rating_[1-3]$/.test(String(inbound?.optionId||''))?Number(String(inbound.optionId).slice(-1)):Number(String(text).trim());
@@ -293,6 +299,7 @@ async function handle(request, response) {
             c = await tx.one("insert into public.conversations(id,company_id,department_id,contact_name,contact_phone,channel_address,subject,status,priority,queue_type,protocol,transport,human_started_at) values($1,$2,$3,$4,$5,$6,'WhatsApp','waiting','normal',$3,$7,'meta',case when not exists(select 1 from public.automation_flows where company_id=$2 and status='published') then now() end) returning *", [id, company, department.id, value.contacts?.[0]?.profile?.name || phone, phone, `${phone}@s.whatsapp.net`, protocol]);
           }
           await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,provider_message_id,delivery_status) values($1,$2,$3,$4,'inbound',$5,'received') on conflict (provider_message_id) do nothing", [randomUUID(), company, c.id, text, providerId]);
+          await applyStoredMetaEdit(tx,company,providerId);
           if(media?.id&&/^\d+$/.test(String(media.id)))await tx.query('update public.messages set attachment_path=$1,attachment_type=$2,attachment_name=$3 where company_id=$4 and provider_message_id=$5',[`meta:${media.id}`,media.mime_type||'application/octet-stream',media.filename||message.type,company,providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
           if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'){
@@ -555,7 +562,7 @@ async function handle(request, response) {
   }
   if (pieces[0]!=='api'||pieces[1]!=='conversations'||!pieces[2]) return json(response,404,{error:'Rota não encontrada.'});
   const selected=await conversation(company,pieces[2]); if (!selected) return json(response,404,{error:'Conversa não encontrada.'}); const id=selected.id;
-    if (request.method==='GET'&&pieces.length===3) { const messages=await db.query("select m.*,case when m.direction='internal' then 'Nota interna' when m.direction='inbound' then 'Cliente' when exists(select 1 from public.connector_events e where e.company_id=m.company_id and e.event_id='echo:'||m.provider_message_id and e.event_type='meta.echo') then 'Atendente pelo celular' when m.profile_id is null then 'Atendimento automático' else coalesce(nullif(btrim(p.display_name),''),nullif(btrim(p.name),''),'Atendente') end author_name,to_char(m.created_at at time zone 'America/Sao_Paulo','HH24:MI') message_time,r.body reply_body from public.messages m left join public.profiles p on p.id=m.profile_id and p.company_id=m.company_id left join public.messages r on r.company_id=m.company_id and r.id=m.reply_to_id where m.company_id=$1 and m.conversation_id=$2 order by m.created_at",[company,id]); return json(response,200,{conversation:selected,messages}); }
+    if (request.method==='GET'&&pieces.length===3) { const messages=await db.query("select m.*,exists(select 1 from public.connector_events e where e.company_id=m.company_id and e.event_type='meta.message' and e.payload->>'type'='edit' and e.payload->'edit'->>'original_message_id'=m.provider_message_id) edited,case when m.direction='internal' then 'Nota interna' when m.direction='inbound' then 'Cliente' when exists(select 1 from public.connector_events e where e.company_id=m.company_id and e.event_id='echo:'||m.provider_message_id and e.event_type='meta.echo') then 'Atendente pelo celular' when m.profile_id is null then 'Atendimento automático' else coalesce(nullif(btrim(p.display_name),''),nullif(btrim(p.name),''),'Atendente') end author_name,to_char(m.created_at at time zone 'America/Sao_Paulo','HH24:MI') message_time,r.body reply_body from public.messages m left join public.profiles p on p.id=m.profile_id and p.company_id=m.company_id left join public.messages r on r.company_id=m.company_id and r.id=m.reply_to_id where m.company_id=$1 and m.conversation_id=$2 and not exists(select 1 from public.connector_events e where e.company_id=m.company_id and e.event_type='meta.message' and e.provider_message_id=m.provider_message_id and e.payload->>'type'='edit' and e.payload->'edit'->'message'->>'type'='text') order by m.created_at",[company,id]); return json(response,200,{conversation:selected,messages}); }
   if(request.method==='POST'&&pieces.length===4&&pieces[3]==='send-invoice'){
     const requestInput=await body(request);
     if(selected.status==='closed'||selected.assigned_profile_id!==session.profile.id)return json(response,409,{error:'Assuma um atendimento aberto antes de enviar a fatura.'});
@@ -613,6 +620,13 @@ async function handle(request, response) {
 const server=createServer((req,res)=>{ handle(req,res).catch(error=>{ console.error('Request failed:',error.message); if (!res.headersSent) { const status=error.status||500; json(res,status,{error:(status>=400&&status<500)||status===503?error.message:'Falha na consulta.'}); } }); });
 const port=Number(process.env.PORT||3100);
 server.listen(port,()=>{
+  db.query(`update public.messages m set attachment_path='meta:'||(e.payload->(e.payload->>'type')->>'id'),
+    attachment_type=coalesce(e.payload->(e.payload->>'type')->>'mime_type','application/octet-stream'),
+    attachment_name=coalesce(e.payload->(e.payload->>'type')->>'filename',e.payload->>'type')
+    from public.connector_events e where e.company_id=m.company_id and e.provider_message_id=m.provider_message_id
+    and e.event_type='meta.message' and m.attachment_path is null and e.payload->>'type' in ('image','audio','video','document','sticker')
+    and e.payload->(e.payload->>'type')->>'id' ~ '^[0-9]+$'`).catch(error=>console.error('Media recovery failed:',error.code||'unknown'));
+  recoverStoredMetaEdits(db).catch(error=>console.error('Meta edit recovery failed:',error.code||'unknown'));
   startIdleSweep(db,{onError:error=>console.error('Idle sweep failed:',error.code||'unknown')});
   console.log(`Central PostgreSQL na porta ${port}`);
   try { startCloudConnector(); } catch (error) { console.error(`[baileys] ${error.message}`); }

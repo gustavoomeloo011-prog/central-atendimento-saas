@@ -8,6 +8,11 @@ export function mediaKind(message) {
   return 'document';
 }
 
+export function visibleMessageBody(message) {
+  const body=String(message.body||'');
+  return message.attachment_path&&/^\[Mensagem (audio|image|video|document|sticker)\]$/.test(body)?'':body;
+}
+
 export function captureScroll(element) {
   return {top:element.scrollTop,follow:element.scrollHeight-element.clientHeight-element.scrollTop<80};
 }
