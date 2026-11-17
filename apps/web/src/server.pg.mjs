@@ -605,6 +605,11 @@ async function handle(request, response) {
       if(action==='transfer'){
         const d=await tx.one('select id from public.departments where id=$1 and company_id=$2',[input.department_id,company]);
         if(!d)return {error:'Setor inválido.'};
+        if(input.to_robot===true){
+          await tx.query("update public.conversations set department_id=$1,assigned_profile_id=null,status='open',human_started_at=null,updated_at=now() where id=$2 and company_id=$3",[d.id,id,company]);
+          await tx.query("update public.flow_runs set status='active',updated_at=now() where company_id=$1 and conversation_id=$2",[company,id]);
+          return {ok:true};
+        }
         const assignee=input.assigned_profile_id?await tx.one('select id from public.profiles where id=$1 and company_id=$2',[input.assigned_profile_id,company]):null;
         await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where id=$3 and company_id=$4",[d.id,assignee?.id||null,id,company]);
       }

@@ -450,8 +450,15 @@ function bindConversation(conversation) {
     } catch (error) { alert(error.message); }
   };
   document.querySelector('#transfer').onclick = async () => {
-    const department = prompt('Fila: ' + state.departments.map(item => item.id).join(', '));
-    if (department) conversationAction(conversation.id, 'transfer', { department_id: department });
+    const dialog=document.createElement('dialog'); dialog.className='card transferChoice';
+    const departments=(state.departments||[]).map(item=>'<option value="'+esc(item.id)+'">'+esc(item.name||('Fila '+item.id))+'</option>').join('');
+    const profiles=(state.profiles||[]).filter(item=>item.id!==state.profile?.id).map(item=>'<option value="'+esc(item.id)+'">'+esc(item.display_name||item.name||'Atendente')+'</option>').join('');
+    dialog.innerHTML='<h2>Transferir atendimento</h2><p>Escolha o próximo responsável.</p><label class="field">Fila<select id="transferDepartment">'+departments+'</select></label><div class="transferChoiceActions"><button class="btn" data-transfer="robot">Devolver ao robô</button><button class="btn subtle" data-transfer="agent">Transferir para atendente</button><button class="btn subtle" data-transfer="cancel">Cancelar</button></div><div class="transferAgentField" hidden><label class="field">Atendente<select id="transferProfile">'+profiles+'</select></label><button class="btn" data-transfer="confirm-agent">Confirmar transferência</button></div>';
+    document.body.appendChild(dialog); dialog.showModal(); dialog.addEventListener('close',()=>dialog.remove());
+    dialog.querySelector('[data-transfer="cancel"]').onclick=()=>dialog.close();
+    dialog.querySelector('[data-transfer="robot"]').onclick=()=>{const department_id=dialog.querySelector('#transferDepartment').value;dialog.close();conversationAction(conversation.id,'transfer',{department_id,to_robot:true});};
+    dialog.querySelector('[data-transfer="agent"]').onclick=()=>{dialog.querySelector('.transferChoiceActions').hidden=true;dialog.querySelector('.transferAgentField').hidden=false;};
+    dialog.querySelector('[data-transfer="confirm-agent"]').onclick=()=>{const department_id=dialog.querySelector('#transferDepartment').value,assigned_profile_id=dialog.querySelector('#transferProfile').value;dialog.close();conversationAction(conversation.id,'transfer',{department_id,assigned_profile_id});};
   };
 }
 
