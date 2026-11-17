@@ -48,3 +48,21 @@ body{background:#eef3f9;color:#172033}.shell{background:#eef3f9;grid-template-co
 /* Final inbox refinements */
 .chat{min-width:0;overflow:hidden}.messages{min-width:0;overflow-x:hidden}.message{max-width:min(88%,680px);overflow-wrap:anywhere}.clientPanel{min-width:0;overflow:auto}.panelTitleActions{display:flex;align-items:center;gap:6px}.clientPanelToggle{font-size:18px;line-height:1;padding:4px 9px}.automationActions{display:flex;align-items:center;gap:10px}.switchLabel{display:inline-flex;align-items:center;gap:8px;font-weight:800;color:#263a54}.switchLabel input{position:absolute;opacity:0;width:1px;height:1px}.switchTrack{width:42px;height:24px;border-radius:999px;background:#b7c4d6;position:relative;transition:.2s}.switchTrack:after{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0003;transition:.2s}.switchLabel input:checked+.switchTrack{background:#16a34a}.switchLabel input:checked+.switchTrack:after{left:21px}.invoiceSend{padding:5px 8px;font-size:10px;margin-left:auto}.invoiceList p{align-items:center}
 .newConversationCard{max-width:520px}.newConversationCard .historyBody{background:#f7f9fc}.newConversationCard .field{color:#263a54}.newConversationCard textarea{min-height:100px;resize:vertical}
+
+/* Independent inbox panes: headers stay visible while each list scrolls. */
+.inboxShell{height:100dvh;min-height:0;overflow:hidden}
+.inboxShell>.list,.inboxShell>.chat,.inboxShell>.clientPanel{height:100%;min-height:0;overflow:hidden}
+.inboxShell>.chat{display:flex;flex-direction:column;padding:0}
+.inboxShell .chatHead,.inboxShell .chatActions,.inboxShell .sendLockHint,.inboxShell .replyPreview,.inboxShell .composer,.inboxShell .mobileChatNav{flex:0 0 auto}
+.inboxShell .messages{flex:1 1 0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable;overflow-anchor:none}
+.inboxShell .conversationList{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.inboxShell .listTitle,.inboxShell .list>.toolbar{flex-shrink:0}
+.inboxShell>.clientPanel{overflow-y:auto;overscroll-behavior:contain}
+.messages,.conversationList{scrollbar-width:auto;scrollbar-color:#92add0 #edf3fa}
+.messages::-webkit-scrollbar,.conversationList::-webkit-scrollbar{width:10px}
+.messages::-webkit-scrollbar-thumb,.conversationList::-webkit-scrollbar-thumb{background:#92add0;border:2px solid #edf3fa;border-radius:8px}
+.messageMedia{display:block;max-width:100%;margin-top:8px;border-radius:10px}
+img.messageMedia{width:auto;max-height:320px;object-fit:contain;min-height:80px}
+audio.messageMedia{width:320px;max-width:100%;min-height:54px}
+video.messageMedia{max-height:320px}
+@media(max-width:850px){.inboxShell[data-mobile-pane="list"]>.chat,.inboxShell[data-mobile-pane="list"]>.clientPanel,.inboxShell[data-mobile-pane="chat"]>.list,.inboxShell[data-mobile-pane="chat"]>.clientPanel,.inboxShell[data-mobile-pane="client"]>.list,.inboxShell[data-mobile-pane="client"]>.chat{display:none}}

@@ -2,6 +2,7 @@ const attendanceLabel = value => ({waiting:'Aguardando',open:'Em atendimento',cl
 import { inQueue } from './queues.js';
 import { renderSgp } from './sgp-panel.js';
 import { showFlowEditor } from './flow-editor.js';
+import { mediaKind, captureScroll, restoreScroll, followMediaLayout } from './chat-view.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
 let token = localStorage.getItem('central_token');
@@ -17,7 +18,7 @@ new MutationObserver(()=>{
       const result=await fetch(source,{headers:{authorization:'Bearer '+token}});
       if(!result.ok)throw Error('Mídia indisponível');
       const blob=await result.blob();if(!element.isConnected)return;
-      const url=URL.createObjectURL(blob);mediaObjects.set(element,url);element.src=url;
+      const url=URL.createObjectURL(blob);mediaObjects.set(element,url);followMediaLayout(element);element.src=url;
       element.style.maxWidth='100%';element.style.maxHeight='320px';
     }catch{element.insertAdjacentText('afterend',' Mídia indisponível. Abra novamente a conversa para tentar.');}
   });
@@ -35,6 +36,7 @@ function leaveWhatsApp() { whatsappView++; clearTimeout(whatsappTimer); }
 let whatsappMode = 'qr';
 let replyTo = null;
 let liveTimer = null;
+const threadPositions=new Map(),queuePositions=new Map();
 let currentView = 'login';
 const sgpData = new Map();
 function bindInvoiceButtons(id){
@@ -133,10 +135,11 @@ setInterval(() => {
 }, 1000);
 
 function messageHtml(message) {
+  const kind=mediaKind(message);
   const internal = message.direction === 'internal';
   const robot = !internal && message.direction === 'outbound' && /autom[aá]tico|rob[oô]/i.test(message.author_name || '');
   const mediaUrl=message.attachment_path?'/api/attachments/'+encodeURIComponent(message.id):'';
-  const attachment = message.attachment_path ? (String(message.attachment_type||'').startsWith('image/') ? '<img class="messageMedia" data-media-src="'+mediaUrl+'" alt="'+esc(message.attachment_name||'Imagem recebida')+'" loading="lazy">' : String(message.attachment_type||'').startsWith('audio/') ? '<audio class="messageMedia" controls preload="metadata" data-media-src="'+mediaUrl+'"></audio>' : String(message.attachment_type||'').startsWith('video/') ? '<video class="messageMedia" controls preload="metadata" data-media-src="'+mediaUrl+'"></video>' : '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>') : '';
+  const attachment = message.attachment_path ? (kind==='image' ? '<img class="messageMedia" data-media-src="'+mediaUrl+'" alt="'+esc(message.attachment_name||'Imagem recebida')+'" loading="eager" decoding="async">' : kind==='audio' ? '<audio class="messageMedia" controls preload="auto" data-media-src="'+mediaUrl+'"></audio>' : kind==='video' ? '<video class="messageMedia" controls preload="auto" data-media-src="'+mediaUrl+'"></video>' : '<button class="attachment" type="button" data-attachment="' + esc(message.id) + '">📎 ' + esc(message.attachment_name || 'Abrir anexo') + '</button>') : '';
   const reply = message.reply_body ? '<div class="quoted">↩ ' + esc(message.reply_body) + '</div>' : '';
   const status = message.direction === 'outbound' ? ({pending:' · pendente',sending:' · enviando',sent:' ✓',delivered:' ✓✓',read:' ✓✓ lida',failed:' · falhou',unknown:' · indeterminada'}[message.delivery_status]||' · pendente') : '';
   const author = internal ? 'Nota interna' : robot ? 'Robô SG Fibra' : message.direction === 'inbound' ? 'Cliente' : (message.author_name || 'Atendente');
@@ -187,6 +190,11 @@ function shell(content, title = 'Caixa de entrada') {
 }
 
 function render() {
+  const oldThread=document.querySelector('.messages[data-conversation-id]');
+  if(oldThread)threadPositions.set(oldThread.dataset.conversationId,captureScroll(oldThread));
+  const oldQueue=document.querySelector('.conversationList[data-queue]');
+  if(oldQueue)queuePositions.set(oldQueue.dataset.queue,oldQueue.scrollTop);
+  const retainedMedia=new Map([...document.querySelectorAll('.messages .messageMedia')].map(element=>[element.getAttribute('data-media-src'),element]));
   currentView = 'inbox';
   leaveWhatsApp();
   const list = [...(state.conversations || [])].sort((a, b) => {
@@ -254,6 +262,15 @@ function render() {
   document.querySelectorAll('.conversation').forEach(element => element.onclick = () => openConversation(element.dataset.id));
   document.querySelectorAll('[data-quick]').forEach(button => button.onclick = () => useQuick(button.dataset.quick));
   if (conversation) bindConversation(conversation);
+  document.querySelector('.shell').classList.add('inboxShell');
+  const thread=document.querySelector('.messages');
+  if(thread){
+    thread.dataset.conversationId=String(activeId);
+    thread.querySelectorAll('.messageMedia').forEach(element=>{const previous=retainedMedia.get(element.getAttribute('data-media-src'));if(previous?.src)element.replaceWith(previous);});
+    restoreScroll(thread,threadPositions.get(String(activeId)));
+  }
+  const queue=document.querySelector('.conversationList');
+  if(queue){queue.dataset.queue=inboxMode;queue.scrollTop=queuePositions.get(inboxMode)||0;}
   const copyProtocol = document.querySelector('#copyProtocol');
   if (copyProtocol) copyProtocol.onclick = async () => {
     try { await navigator.clipboard.writeText(conversation.protocol); copyProtocol.textContent = 'Copiado'; setTimeout(() => { if (copyProtocol.isConnected) copyProtocol.textContent = 'Copiar'; }, 1400); }
