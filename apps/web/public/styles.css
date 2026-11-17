@@ -67,3 +67,5 @@ audio.messageMedia{width:320px;max-width:100%;min-height:54px}
 video.messageMedia{max-height:320px}
 @media(max-width:850px){.inboxShell[data-mobile-pane="list"]>.chat,.inboxShell[data-mobile-pane="list"]>.clientPanel,.inboxShell[data-mobile-pane="chat"]>.list,.inboxShell[data-mobile-pane="chat"]>.clientPanel,.inboxShell[data-mobile-pane="client"]>.list,.inboxShell[data-mobile-pane="client"]>.chat{display:none}}
 .attendanceChoice{width:min(480px,calc(100vw - 32px));border:1px solid #dce5f1}.attendanceChoice::backdrop{background:#071b3b88}.attendanceChoiceActions{display:grid;gap:10px}.attendanceChoice h2{margin-top:0}
+
+.conversationTags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.contactTag{display:inline-block;padding:3px 7px;border-radius:7px;font-size:10px;line-height:1.4;font-weight:700;background:#e9f3ff;color:#22568c}.contactTag.rare{background:#e4f5ec;color:#226243}.contactTag.occasional{background:#e6efff;color:#2853a1}.contactTag.frequent{background:#f0e6ff;color:#6b36a3}.contactTag.offline,.contactTag.debt{background:#ffe4e4;color:#9d2834}.contactTag.slow{background:#fff0bf;color:#795812}
