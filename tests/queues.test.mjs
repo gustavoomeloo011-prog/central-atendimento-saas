@@ -2,6 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inQueue } from '../apps/web/public/queues.js';
 const now=Date.parse('2026-11-10T12:00:00Z');
+
+test('atendimento iniciado pelo celular permanece visível na fila humana sem atribuir outro usuário',()=>{
+  const c={status:'open',human_started_at:'2026-11-10T11:00:00Z',assigned_profile_id:null};
+  assert.equal(inQueue(c,'human','a'),true);
+  assert.equal(inQueue(c,'general','a'),false);
+  assert.equal(inQueue(c,'mine','a'),false);
+  assert.equal(inQueue({...c,assigned_profile_id:'a'},'human','a'),false);
+  assert.equal(inQueue({...c,assigned_profile_id:'a'},'mine','a'),true);
+  assert.equal(inQueue({...c,status:'closed'},'human','a'),false);
+});
 test('Geral inclui robô e novos; Meus somente responsável',()=>{
   for(const status of ['open','waiting'])assert.equal(inQueue({status},'general','a'),true);
   assert.equal(inQueue({status:'open',assigned_profile_id:'a'},'general','a'),false);
