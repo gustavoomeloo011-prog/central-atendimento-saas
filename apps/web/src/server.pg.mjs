@@ -46,7 +46,7 @@ async function sendBrevoRecovery(email, name, link) {
   return true;
 }
 const brevoConfigured = () => ({apiKeyConfigured:Boolean(String(process.env.BREVO_API_KEY||'').trim()),senderConfigured:Boolean(String(process.env.BREVO_SENDER_EMAIL||'').trim()),senderEmail:String(process.env.BREVO_SENDER_EMAIL||'').trim()});
-function fullRobotActive(settings, now = new Date()) { if (!settings?.full_robot_enabled) return true; const [sh,sm]=String(settings.full_robot_start||'21:00').split(':').map(Number),[eh,em]=String(settings.full_robot_end||'09:00').split(':').map(Number),current=now.getHours()*60+now.getMinutes(),start=sh*60+sm,end=eh*60+em; return start===end ? true : start<end ? current>=start&&current<end : current>=start||current<end; }
+function fullRobotActive(settings, now = new Date()) { if (!settings?.full_robot_enabled) return true; const [sh,sm]=String(settings.full_robot_start||'21:00').split(':').map(Number),[eh,em]=String(settings.full_robot_end||'09:00').split(':').map(Number),parts=new Intl.DateTimeFormat('en-GB',{timeZone:settings.full_robot_timezone||'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(now),current=Number(parts.find(p=>p.type==='hour')?.value)*60+Number(parts.find(p=>p.type==='minute')?.value),start=sh*60+sm,end=eh*60+em; return start===end ? true : start<end ? current>=start&&current<end : current>=start||current<end; }
 async function sessionFor(request) {
   const token = (request.headers.authorization || '').replace(/^Bearer /, '');
   if (!token) return null;
@@ -160,28 +160,30 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
   await tx.query('update public.flow_runs set node_id=$1,steps=$2,variables=$3,status=$4,updated_at=now() where company_id=$5 and conversation_id=$6',[result.nodeId,result.steps,result.variables,result.finished?'finished':'active',company,c.id]);
   if(result.transfer)await tx.query("update public.conversations set department_id=$1,assigned_profile_id=$2,status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$3 and id=$4",[result.transfer.departmentId,result.transfer.profileId,company,c.id]);
   const reachedEnd=result.executed.some(nodeId=>version.definition.nodes.some(node=>node.id===nodeId&&node.type==='end'));
-  if(reachedEnd)await tx.query("update public.conversations set status='waiting',assigned_profile_id=null,closed_at=null,human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+  if(reachedEnd) {
+    await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+    result.output.push({type:'message',text:'Atendimento encerrado. Obrigado por falar com a SG Fibra! Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});
+  }
   const invoiceRequested=/segunda\s*via|fatura|boleto/i.test(String(result.lastReply||''));
   if(invoiceRequested){
     const sgpResult=await sgp.lookup(company,c.contact_phone);
     const items=(sgpResult.customer?.invoices?.items||[]).filter(item=>item?.id&&item?.dueDate).sort((a,b)=>String(a.dueDate).localeCompare(String(b.dueDate))).slice(-2);
     const invoiceLines=[];
     for(const item of items){
-      try{const doc=await sgp.invoice(company,item.id);invoiceLines.push(`Fatura com vencimento em ${item.dueDate}:\n${doc.barcode?`Código de barras: ${doc.barcode}\n`:''}Boleto: ${doc.link}`);}catch{invoiceLines.push(`Fatura com vencimento em ${item.dueDate}: ${new URL('/admin/financeiro/titulo/print/documento/?q='+encodeURIComponent(item.id),process.env.SGP_BASE_URL).toString()}`);}
+      try{const doc=await sgp.invoice(company,item.id);invoiceLines.push(`Fatura com vencimento em ${item.dueDate}:\n${doc.barcode?`Código de barras: ${doc.barcode}\n`:''}Boleto: ${doc.link}`);}catch{ /* Sem documento confirmado, não inventar link. */ }
     }
     const text=invoiceLines.length?`Segue sua 2ª via:\n\n${invoiceLines.join('\n\n')}`:'Não localizei faturas vencidas ou próximas do vencimento no SGP.';
     result.output.push({type:'message',text,options:[]});
-    await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
-    result.transfer=null; result.finished=true;
+    if(invoiceLines.length){await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});result.transfer=null;result.finished=true;}
   }
-  if(result.transfer||reachedEnd){
+  if(result.transfer){
     const ahead=await tx.one("select count(*)::int count from public.conversations where company_id=$1 and status='waiting' and assigned_profile_id is null and id<>$2 and coalesce(human_started_at,created_at)<now()",[company,c.id]);
     const count=Math.max(0,Number(ahead?.count||0));
     result.output.push({type:'message',text:`Seu atendimento foi encaminhado para a fila. Há ${count} pessoa(s) na sua frente.`,options:[]});
   }
   const outbound=result.output.filter(item=>item.type==='message').map(item=>({text:item.text,options:item.options||[],nodeId:item.nodeId||null,flowVersionId:run.version_id}));
   const reply=outbound.map(item=>formatNumberedOptions(item.text,item.options)).join('\n\n');
-  return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer||reachedEnd)};
+  return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer)};
 }
 async function sendConversationNotice(company, selected, session, text, options=[]){
   const messageId=randomUUID();
@@ -401,7 +403,7 @@ async function handle(request, response) {
     const [activeFlow,existingRun,robotSettings]=await Promise.all([
       db.one("select id from public.automation_flows where company_id=$1 and status='published' limit 1",[company]),
       db.one("select c.id,c.transport,c.assigned_profile_id,fr.status as run_status from public.conversations c left join public.flow_runs fr on fr.company_id=c.company_id and fr.conversation_id=c.id where c.company_id=$1 and (c.channel_address=$2 or c.contact_phone=$3) and c.status<>'closed' order by c.updated_at desc limit 1",[company,channelAddress||null,phone]),
-      db.one('select full_robot_enabled,full_robot_start,full_robot_end from public.automation_settings where company_id=$1',[company]).catch(()=>null)
+      db.one('select full_robot_enabled,full_robot_start,full_robot_end,full_robot_timezone from public.automation_settings where company_id=$1',[company]).catch(()=>null)
     ]);
     const robotInWindow=fullRobotActive(robotSettings);
     const conversationTransport=existingRun?.transport||defaultTransport;
