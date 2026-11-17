@@ -192,6 +192,11 @@ async function sendConversationNotice(company, selected, session, text, options=
 
 async function handle(request, response) {
   const url = new URL(request.url, 'http://localhost');
+  if (request.method === 'GET' && url.pathname === '/api/version') {
+    const commit=String(process.env.RENDER_GIT_COMMIT||'');
+    response.setHeader('cache-control','no-store');
+    return json(response,200,{commit:/^[a-f0-9]{40}$/i.test(commit)?commit:null});
+  }
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) { response.writeHead(200, {'content-type':'text/html; charset=utf-8'}); return response.end(await readFile(join(publicDir,'index.html'))); }
   if (request.method === 'GET' && url.pathname.startsWith('/assets/')) { const file = join(publicDir, url.pathname.slice(8)); if (!existsSync(file)) return json(response,404,{error:'Arquivo não encontrado.'}); response.writeHead(200,{'content-type':file.endsWith('.css')?'text/css':'application/javascript'}); return response.end(await readFile(file)); }
   if (request.method === 'GET' && url.pathname === '/health') { await db.one('select 1 ok'); return json(response,200,{backend:'online',database:'online'}); }

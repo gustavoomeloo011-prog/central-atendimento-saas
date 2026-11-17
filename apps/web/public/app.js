@@ -6,6 +6,14 @@ import { mediaKind, visibleMessageBody, captureScroll, restoreScroll, followMedi
 import { conversationTags } from './conversation-tags.js';
 const app = document.querySelector('#app');
 document.title = 'Atendimento SG Fibra';
+const versionBadge=document.createElement('small');
+versionBadge.className='deploymentVersion';
+versionBadge.textContent='Versão: consultando…';
+document.body.appendChild(versionBadge);
+fetch('/api/version',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json();}).then(({commit})=>{
+  versionBadge.textContent=commit?'Versão · '+commit.slice(0,7):'Versão · local';
+  versionBadge.title=commit?'Commit em execução no Render: '+commit:'Commit do Render não disponível neste ambiente.';
+}).catch(()=>{versionBadge.textContent='Versão · indisponível';});
 let token = localStorage.getItem('central_token');
 setInterval(()=>{fetch('/health',{cache:'no-store'}).catch(()=>{});},600000);
 const mediaObjects=new Map();
