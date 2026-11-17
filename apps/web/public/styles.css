@@ -74,3 +74,5 @@ video.messageMedia{max-height:320px}
 .deploymentVersion{position:fixed;bottom:3px;right:8px;z-index:30;font-size:10px;line-height:14px;color:#64748b;background:rgba(255,255,255,.88);padding:1px 5px;border-radius:4px;pointer-events:auto}
 
 .transferChoice{width:min(460px,calc(100vw - 32px));color:#172033;background:#fff;border:1px solid #dce5f1;border-radius:14px}.transferChoice h2{margin-top:0}.transferChoiceActions{display:flex;gap:8px;flex-wrap:wrap}.transferAgentField{margin-top:14px}.shell.menuClosed > .top{grid-column:1/-1}.shell.menuClosed > .settings,.shell.menuClosed > .queueDashboard{grid-column:1/-1}
+
+.conversation.active{border:2px solid #1683ff!important;box-shadow:0 0 0 3px #1683ff33,0 8px 22px #1683ff33;background:#eef7ff}.unreadConversation{background:#fffaf0;border-right:3px solid #f59e0b}.unreadBadge{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 5px;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;font-weight:800;margin-left:auto;margin-right:4px}.conversationTop .unreadBadge+time{margin-left:0}
