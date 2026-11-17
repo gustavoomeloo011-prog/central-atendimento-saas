@@ -279,6 +279,12 @@ function render() {
 }
 
 function bindShell() {
+  document.querySelector('.side')?.addEventListener('click',event=>{
+    if(!event.target.closest('.navButton'))return;
+    menuClosed=true;
+    localStorage.setItem('central_menu_closed','1');
+    document.querySelector('.shell')?.classList.add('menuClosed');
+  },{capture:true});
   document.querySelector('.shell').classList.toggle('menuClosed', menuClosed);
   document.querySelector('#menuToggle').onclick = () => { menuClosed = !menuClosed; localStorage.setItem('central_menu_closed', menuClosed ? '1' : '0'); document.querySelector('.shell').classList.toggle('menuClosed', menuClosed); };
   document.querySelector('.top').onclick = event => { if (event.target.closest('#menuToggle') || menuClosed || !matchMedia('(max-width: 850px)').matches) return; menuClosed = true; localStorage.setItem('central_menu_closed','1'); document.querySelector('.shell').classList.add('menuClosed'); };
@@ -377,7 +383,15 @@ function bindConversation(conversation) {
       await openConversation(conversation.id);
     } catch (error) { alert(error.message); }
   };
-  document.querySelector('#assume').onclick = () => conversationAction(conversation.id, 'assume');
+  document.querySelector('#assume').onclick = () => {
+    const dialog=document.createElement('dialog');
+    dialog.className='card attendanceChoice';
+    dialog.setAttribute('aria-label','Assumir atendimento');
+    dialog.innerHTML='<h2>Assumir atendimento</h2><p>Como deseja iniciar o atendimento?</p><div class="attendanceChoiceActions"><button class="btn" data-choice="greeting">Assumir com apresentação</button><button class="btn subtle" data-choice="silent">Assumir silenciosamente</button><button class="btn subtle" data-choice="cancel">Cancelar</button></div>';
+    document.body.appendChild(dialog);dialog.showModal();
+    dialog.addEventListener('close',()=>dialog.remove());
+    dialog.querySelectorAll('[data-choice]').forEach(button=>button.onclick=()=>{const choice=button.dataset.choice;dialog.close();if(choice!=='cancel')conversationAction(conversation.id,'assume',{send_greeting:choice==='greeting'});});
+  };
   document.querySelector('#close').onclick = () => {
     const dialog=document.createElement('dialog');
     dialog.className='card';

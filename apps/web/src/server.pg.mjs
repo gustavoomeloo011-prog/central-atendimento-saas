@@ -1,4 +1,5 @@
 import { createSgpClient } from './sgp-client.mjs';
+import { startIdleSweep } from './idle-conversations.mjs';
 import { validateAttachment, uploadMetaAttachment, mediaMessage, trustedMetaMediaUrl } from './meta-media.mjs';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -101,7 +102,7 @@ async function deliverMetaOutbox(outboxId){
   if(!item)return;
   try{
     const active=await conversation(item.company_id,item.conversation_id);
-    if(active?.status==='open'&&active.human_started_at)throw new Error('Automação interrompida pelo atendimento humano.');
+    if(active?.status==='closed'||(active?.status==='open'&&active.human_started_at))throw new Error('Automação interrompida: atendimento encerrado ou assumido.');
     const interactive=typeof item.interactive_payload==='string'?JSON.parse(item.interactive_payload||'{}'):(item.interactive_payload||{});
     if(isInteractiveWindowExpired(interactive))throw Object.assign(new Error('A janela de atendimento da Meta expirou; não foi enviada mensagem interativa.'),{status:409});
     const sent=await metaSendMessage({phone:item.to_phone,text:item.body,options:interactive.options||[],nodeId:interactive.nodeId||'',flowVersionId:interactive.flowVersionId||''});
@@ -580,6 +581,9 @@ async function handle(request, response) {
     const result=await db.transaction(async tx=>{
       const c=await tx.one('select * from public.conversations where company_id=$1 and id=$2 for update',[company,id]);
       if(action==='close'&&c.status==='closed')return {ok:true,already_closed:true};
+      if(action==='assume'&&c.status==='closed')return {error:'Atendimento encerrado. Inicie um novo atendimento.'};
+      if(action==='assume'&&c.assigned_profile_id===session.profile.id)return {ok:true,already_assumed:true};
+      if(action==='assume'&&c.assigned_profile_id)return {error:'Este atendimento já foi assumido por outro atendente.'};
       if(action==='assume'||action==='close')await tx.query('update public.flow_runs set status=$1,updated_at=now() where company_id=$2 and conversation_id=$3',[action==='close'?'finished':'paused',company,id]);
       if(action==='assume')await tx.query("update public.conversations set assigned_profile_id=$1,status='open',closed_at=null,updated_at=now(),human_started_at=coalesce(human_started_at,now()) where id=$2 and company_id=$3",[session.profile.id,id,company]);
       if(action==='close'){
@@ -597,8 +601,9 @@ async function handle(request, response) {
     });
     if(result.error)return json(response,400,result);
     if(result.already_closed)return json(response,200,{ok:true,already_closed:true});
+    if(result.already_assumed)return json(response,200,{ok:true,already_assumed:true});
     try{
-      if(action==='assume')await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
+      if(action==='assume'&&input.send_greeting===true)await sendConversationNotice(company,selected,session,'Olá! Sou o atendente '+String(session.profile.display_name||session.profile.name||'Atendente').trim()+'. Tudo bem? Como posso te auxiliar?');
       if(action==='close'&&input.send_survey===true)await sendConversationNotice(company,selected,session,'Atendimento encerrado. Obrigado por falar com a SG Fibra! Avalie o atendimento:',[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]);
     }catch(error){return json(response,200,{ok:true,warning:'Atendimento encerrado, mas a mensagem automática não pôde ser enviada agora.'});}
     return json(response,200,{ok:true});
@@ -608,6 +613,7 @@ async function handle(request, response) {
 const server=createServer((req,res)=>{ handle(req,res).catch(error=>{ console.error('Request failed:',error.message); if (!res.headersSent) { const status=error.status||500; json(res,status,{error:(status>=400&&status<500)||status===503?error.message:'Falha na consulta.'}); } }); });
 const port=Number(process.env.PORT||3100);
 server.listen(port,()=>{
+  startIdleSweep(db,{onError:error=>console.error('Idle sweep failed:',error.code||'unknown')});
   console.log(`Central PostgreSQL na porta ${port}`);
   try { startCloudConnector(); } catch (error) { console.error(`[baileys] ${error.message}`); }
 });

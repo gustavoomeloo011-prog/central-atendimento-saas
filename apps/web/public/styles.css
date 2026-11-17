@@ -66,3 +66,4 @@ img.messageMedia{width:auto;max-height:320px;object-fit:contain;min-height:80px}
 audio.messageMedia{width:320px;max-width:100%;min-height:54px}
 video.messageMedia{max-height:320px}
 @media(max-width:850px){.inboxShell[data-mobile-pane="list"]>.chat,.inboxShell[data-mobile-pane="list"]>.clientPanel,.inboxShell[data-mobile-pane="chat"]>.list,.inboxShell[data-mobile-pane="chat"]>.clientPanel,.inboxShell[data-mobile-pane="client"]>.list,.inboxShell[data-mobile-pane="client"]>.chat{display:none}}
+.attendanceChoice{width:min(480px,calc(100vw - 32px));border:1px solid #dce5f1}.attendanceChoice::backdrop{background:#071b3b88}.attendanceChoiceActions{display:grid;gap:10px}.attendanceChoice h2{margin-top:0}
