@@ -1,0 +1,33 @@
+name: Monitor Render
+
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/render-monitor.yml']
+
+permissions: {}
+
+concurrency:
+  group: render-monitor
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Check running backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --connect-timeout 15 --max-time 90 \
+            --retry 1 --retry-delay 5 --retry-max-time 190 \
+            --header 'Cache-Control: no-cache' \
+            'https://central-atendimento-saas.onrender.com/api/version' \
+            --output /tmp/render-version.json
+          jq -e '.commit | type == "string" and test("^[a-fA-F0-9]{40}$")' /tmp/render-version.json >/dev/null
+          echo 'Backend respondeu; monitoramento concluído.'
