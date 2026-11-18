@@ -107,7 +107,7 @@ async function sendOnTransport(transport,company,payload){
 async function sendOnSelectedTransport(company,payload){return sendOnTransport(await selectedTransport(company),company,payload);}
 async function deliverMetaOutbox(outboxId){
   const item=await db.transaction(async tx=>{
-    const row=await tx.one("select * from public.whatsapp_outbox where id=$1 and status='pending' for update skip locked",[outboxId]);
+    const row=await tx.one("select * from public.whatsapp_outbox where id=$1 and status='pending' and (not_before is null or not_before<=now()) for update skip locked",[outboxId]);
     if(!row)return null;
     return tx.one("update public.whatsapp_outbox set status='leased',attempts=attempts+1,updated_at=now() where id=$1 returning *",[row.id]);
   });
@@ -176,28 +176,40 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
     result.output.push({type:'message',text,options:[]});
     if(invoiceLines.length){await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});result.transfer=null;result.finished=true;}
   }
+  let resetMissingOnu=false;
   const remoteResetNode=version.definition.nodes.find(node=>result.executed.includes(node.id)&&node.title==='Reiniciar ONU');
   if(remoteResetNode){
     try{
       const sgpResult=await sgp.lookup(company,c.contact_phone);
       const service=(sgpResult.customer?.contracts||[]).flatMap(contract=>contract.services||[]).find(item=>item.type==='internet');
       await sgp.resetOnu(company,service?.onuId);
+      const confirmation=version.definition.nodes.find(node=>node.title==='Confirmar conexão');
+      const delayedQuestion=result.output.find(item=>item.nodeId===confirmation?.id);
+      if(delayedQuestion)delayedQuestion.notBefore=new Date(Date.now()+60_000).toISOString();
     }catch(error){
       const notice=result.output.find(item=>item.nodeId===remoteResetNode.id);
-      if(notice)notice.text='Não foi possível reiniciar a ONU remotamente. Desligue o modem da tomada, aguarde 2 minutos e ligue novamente.';
+      if(/ONU não identificada/i.test(String(error.message||''))){
+        resetMissingOnu=true;
+        const support=await tx.one("select id from public.departments where company_id=$1 and name ilike '%suporte%' order by name limit 1",[company]);
+        const confirmation=version.definition.nodes.find(node=>node.title==='Confirmar conexão');
+        result.output=result.output.filter(item=>item.nodeId!==confirmation?.id);
+        if(notice)notice.text='Não localizei um modem vinculado ao seu cadastro para fazer o reinício remoto. Vou abrir uma solicitação para o suporte verificar seu caso.';
+        if(support){result.transfer={departmentId:support.id,profileId:null};result.finished=true;}
+      }else if(notice)notice.text='Não foi possível reiniciar a ONU remotamente. Desligue o modem da tomada, aguarde 2 minutos e ligue novamente.';
     }
   }
   // For a confirmed technical failure, register the corrective occurrence and O.S.
   // in the SGP before closing. Any integration failure leaves the conversation in
   // the support queue so the customer is never told a ticket exists when it does not.
   const transferNode=version.definition.nodes.find(node=>result.executed.includes(node.id)&&node.type==='transfer');
-  const technicalTransfer=/Lentidão continua|Sem conexão|Outro problema técnico/i.test(String(transferNode?.title||''));
+  const technicalTransfer=resetMissingOnu||/Lentidão continua|Sem conexão|Outro problema técnico/i.test(String(transferNode?.title||''));
   if(result.transfer&&technicalTransfer){
     try{
       const sgpResult=await sgp.lookup(company,c.contact_phone);
       const contract=(sgpResult.customer?.contracts||[]).find(item=>(item.services||[]).some(service=>service.type==='internet'));
       const service=contract?.services?.find(item=>item.type==='internet');
       await sgp.openSlowConnectionTicket(company,{customerId:sgpResult.customer?.id,contractId:contract?.id,serviceId:service?.id,description:result.variables?.lastReply});
+      await tx.query("insert into public.robot_sgp_tickets(id,company_id,conversation_id,protocol,contact_name,contact_phone,kind,status,sgp_confirmed) values($1,$2,$3,$4,$5,$6,$7,'opened',true) on conflict(company_id,conversation_id,kind) do nothing",[randomUUID(),company,c.id,c.protocol||null,c.contact_name||null,c.contact_phone||null,resetMissingOnu?'no_connection':'slow_connection']).catch(error=>{if(error.code!=='42P01')throw error;});
       await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
       result.output.push({type:'message',text:'Registramos sua solicitação técnica no SGP. Nossa equipe retornará no horário comercial.',options:[]});
       result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});
@@ -222,7 +234,7 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
     const count=Math.max(0,Number(ahead?.count||0));
     result.output.push({type:'message',text:`Seu atendimento foi encaminhado para a fila. Há ${count} pessoa(s) na sua frente.`,options:[]});
   }
-  const outbound=result.output.filter(item=>item.type==='message').map(item=>({text:item.text,options:item.options||[],nodeId:item.nodeId||null,flowVersionId:run.version_id}));
+  const outbound=result.output.filter(item=>item.type==='message').map(item=>({text:item.text,options:item.options||[],nodeId:item.nodeId||null,flowVersionId:run.version_id,notBefore:item.notBefore||null}));
   const reply=outbound.map(item=>formatNumberedOptions(item.text,item.options)).join('\n\n');
   return {reply:reply||null,outbound,selectedOption:result.lastReply||null,queued:Boolean(result.transfer)};
 }
@@ -373,7 +385,7 @@ async function handle(request, response) {
             for(const delivery of deliveries){
               const messageId=randomUUID(),outboxId=randomUUID(),historyBody=formatNumberedOptions(delivery.text,delivery.options),messageTimestamp=Number(message.timestamp),receivedAt=Number.isFinite(messageTimestamp)&&messageTimestamp>0?messageTimestamp*1000:Date.now(),interactive={options:delivery.options||[],nodeId:delivery.nodeId||'',flowVersionId:delivery.flowVersionId||'',windowExpiresAt:new Date(receivedAt+24*60*60*1000).toISOString()};
               await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,historyBody]);
-              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body,interactive_payload) values($1,$2,$3,$4,$5,$6,$7) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,String(delivery.text||''),interactive]);
+              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body,interactive_payload,not_before) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,String(delivery.text||''),interactive,delivery.notBefore||null]);
             }
           }else if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'&&!robotInWindow){
             // Outside the configured full-robot period, retain the arrival order in the
@@ -547,6 +559,10 @@ async function handle(request, response) {
     return json(response,200,{profile:session.profile,company:companyRow,conversations,departments,quickReplies:replies,robotEnabled:Boolean(robot?.enabled)});
   }
   if (request.method === 'GET' && url.pathname === '/api/settings') { const [profiles,departments,settings,replies,whatsappTransport,ratingStats,sgpRow]=await Promise.all([db.query('select id,name,email,role,status from public.profiles where company_id=$1 order by name',[company]),db.query('select * from public.departments where company_id=$1 order by name',[company]),db.one('select * from public.automation_settings where company_id=$1',[company]),db.query('select * from public.quick_replies where company_id=$1 order by shortcut',[company]),selectedTransport(company),db.query("select p.id,p.name,count(r.id)::int rated_count,coalesce(sum(r.stars),0)::int stars_total,coalesce(round(avg(r.stars),2),0)::numeric average_stars from public.profiles p left join public.conversation_ratings r on r.company_id=$1 and r.profile_id=p.id where p.company_id=$1 group by p.id,p.name order by p.name",[company]).catch(()=>[]),db.one('select sgp_base_url,sgp_username,sgp_password_ciphertext,sgp_token_ciphertext from public.company_integrations where company_id=$1',[company]).catch(()=>null)]); return json(response,200,{profiles,departments,settings,replies,whatsappTransport,ratingStats,sgpIntegration:{baseUrl:sgpRow?.sgp_base_url||'',username:sgpRow?.sgp_username||'',passwordConfigured:Boolean(sgpRow?.sgp_password_ciphertext),tokenConfigured:Boolean(sgpRow?.sgp_token_ciphertext)},metaApiConfigured:metaApiConfigured()}); }
+  if (request.method === 'GET' && url.pathname === '/api/robot-tickets') {
+    const tickets=await db.query("select id,protocol,contact_name,contact_phone,kind,status,sgp_confirmed,created_at from public.robot_sgp_tickets where company_id=$1 order by created_at desc limit 200",[company]).catch(error=>{if(error.code==='42P01')return [];throw error;});
+    return json(response,200,{tickets});
+  }
   if (request.method === 'GET' && url.pathname === '/api/settings/brevo') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); return json(response,200,{brevo:brevoConfigured()}); }
   if (request.method === 'PATCH' && url.pathname === '/api/settings/integrations/sgp') { if (!admin(session)) return json(response,403,{error:'Sem permissão.'}); const input=await body(request),baseUrl=String(input.base_url||'').trim().replace(/\/$/,''),username=String(input.username||'').trim(),password=String(input.password||''),token=String(input.token||'').trim(); if (baseUrl && (!/^https:\/\//i.test(baseUrl)||/[?#]/.test(baseUrl))) return json(response,400,{error:'Informe uma URL HTTPS válida, sem caminho de login ou parâmetros.'}); if ((password||token) && !cryptoKey) return json(response,503,{error:'Configure INTEGRATIONS_ENCRYPTION_KEY no Render antes de salvar credenciais.'}); const current=await db.one('select sgp_password_ciphertext,sgp_token_ciphertext from public.company_integrations where company_id=$1',[company]).catch(()=>null); await db.query("insert into public.company_integrations(company_id,sgp_base_url,sgp_username,sgp_password_ciphertext,sgp_token_ciphertext,updated_at) values($1,$2,$3,$4,$5,now()) on conflict(company_id) do update set sgp_base_url=excluded.sgp_base_url,sgp_username=excluded.sgp_username,sgp_password_ciphertext=coalesce(excluded.sgp_password_ciphertext,public.company_integrations.sgp_password_ciphertext),sgp_token_ciphertext=coalesce(excluded.sgp_token_ciphertext,public.company_integrations.sgp_token_ciphertext),updated_at=now()",[company,baseUrl||null,username||null,password?sealIntegration(password):current?.sgp_password_ciphertext||null,token?sealIntegration(token):current?.sgp_token_ciphertext||null]); return json(response,200,{ok:true,configured:Boolean(baseUrl&&username&&(password||current?.sgp_password_ciphertext)),sgpIntegration:{baseUrl,username,passwordConfigured:Boolean(password||current?.sgp_password_ciphertext),tokenConfigured:Boolean(token||current?.sgp_token_ciphertext)}}); }
   if(request.method==='GET'&&url.pathname.startsWith('/api/team/')&&url.pathname.endsWith('/ratings')){
@@ -721,6 +737,12 @@ server.listen(port,()=>{
     and e.payload->(e.payload->>'type')->>'id' ~ '^[0-9]+$'`).catch(error=>console.error('Media recovery failed:',error.code||'unknown'));
   recoverStoredMetaEdits(db).catch(error=>console.error('Meta edit recovery failed:',error.code||'unknown'));
   startIdleSweep(db,{onError:error=>console.error('Idle sweep failed:',error.code||'unknown')});
+  const deliverDueRobotMessages=async()=>{
+    const due=await db.query("select id from public.whatsapp_outbox where status='pending' and idempotency_key like 'meta-message:%' and not_before<=now() order by not_before limit 20").catch(()=>[]);
+    for(const item of due)await deliverMetaOutbox(item.id);
+  };
+  setInterval(()=>void deliverDueRobotMessages(),15_000).unref();
+  void deliverDueRobotMessages();
   console.log(`Central PostgreSQL na porta ${port}`);
   try { startCloudConnector(); } catch (error) { console.error(`[baileys] ${error.message}`); }
 });

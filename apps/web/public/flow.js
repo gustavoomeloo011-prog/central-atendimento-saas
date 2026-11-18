@@ -78,7 +78,7 @@ export function sgFibraRobotFlow({supportDepartmentId='',financeDepartmentId='',
   const check=add('question','Confirmar conexão','A conexão voltou ao normal?',['Sim','Não']);next(remoteReset,check);next(restart,check);
   finish(check,'Conexão restabelecida','Que bom! Se a lentidão voltar, pode chamar a gente novamente.',check.options[0].id);
   transfer(check,'Lentidão continua',supportDepartmentId,'Vou encaminhar o caso para o suporte técnico.',check.options[1].id);
-  transfer(support,'Sem conexão',supportDepartmentId,'Vou encaminhar o caso de falta de conexão para o suporte técnico.',support.options[1].id);
+  edge(support,support.options[1].id,resetConsent);
   const describe=add('wait','Descrever problema','Por favor, descreva brevemente o que está acontecendo.');
   edge(support,support.options[2].id,describe);transfer(describe,'Outro problema técnico',supportDepartmentId);
 

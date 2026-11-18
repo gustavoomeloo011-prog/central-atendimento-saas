@@ -238,8 +238,8 @@ function showNewConversationCard(){
 }
 
 function shell(content, title = 'Caixa de entrada') {
-  const active = title === 'Caixa de entrada' ? 'inbox' : ({Filas:'queues',Equipe:'team',Automações:'automations',Indicadores:'indicators',Configurações:'settings'}[title] || 'inbox');
-  const nav = [['inbox','▣','Atendimentos'],['queues','◇','Filas'],['team','♙','Equipe'],['automations','♙','Robôs'],['indicators','▥','Indicadores'],['settings','⚙','Configurações']].map(([id,icon,label])=>'<button class="navButton '+(active===id?'activeNav':'')+'" id="'+id+'"><span>'+icon+'</span> '+label+'</button>').join('');
+  const active = title === 'Caixa de entrada' ? 'inbox' : ({Filas:'queues',Equipe:'team',Automações:'automations',Indicadores:'indicators',Chamados:'tickets',Configurações:'settings'}[title] || 'inbox');
+  const nav = [['inbox','▣','Atendimentos'],['queues','◇','Filas'],['team','♙','Equipe'],['automations','♙','Robôs'],['indicators','▥','Indicadores'],['tickets','☏','Chamados'],['settings','⚙','Configurações']].map(([id,icon,label])=>'<button class="navButton '+(active===id?'activeNav':'')+'" id="'+id+'"><span>'+icon+'</span> '+label+'</button>').join('');
   return '<div class="shell'+(clientPanelOpen?'':' clientPanelClosed')+'"><aside class="side"><div class="sideBrand"><span class="brandMark">◔</span><div><h2>SG Fibra</h2><small>Central de atendimento</small></div></div><div class="nav">'+nav+'<button class="navButton logoutButton" id="logout"><span>↪</span> Sair</button></div></aside><header class="top"><button class="menuToggle" id="menuToggle" aria-label="Abrir ou fechar menu">☰</button><div class="pageTitle"><b>' + (title === 'Caixa de entrada' ? 'Atendimentos' : title) + '</b><span class="muted">' + esc(state.company.name) + '</span></div><div class="profileBadge"><span class="profileAvatar">' + esc(initials(state.profile.name)) + '</span><span><b>' + esc(state.profile.name) + '</b><small>' + esc(state.profile.role) + '</small></span></div></header>' + content + '</div>';
 }
 
@@ -348,6 +348,7 @@ function bindShell() {
   document.querySelector('#team').onclick = () => openPanel('team');
   document.querySelector('#automations').onclick = () => openPanel('automations');
   document.querySelector('#indicators').onclick = () => openPanel('indicators');
+  document.querySelector('#tickets').onclick = () => openPanel('tickets');
   document.querySelector('#settings').onclick = settings;
 }
 
@@ -372,6 +373,10 @@ async function openPanel(type) {
     app.innerHTML = shell('<section class="settings"><div class="settingsHead"><div><h2>Equipe</h2><p class="muted">Atendentes individuais, status e desempenho.</p></div><button class="btn" id="manageTeam">Gerenciar equipe</button></div><p class="muted">Clique em um perfil para ver os atendimentos encerrados e as notas recebidas.</p><div class="settingsGrid">' + people + '</div><div id="teamRatings"></div></section>', 'Equipe');
     document.querySelector('#manageTeam').onclick = settings;
     document.querySelectorAll('.teamCard').forEach(card=>card.onclick=async()=>{const panel=document.querySelector('#teamRatings');panel.innerHTML='<article class="card"><p>Carregando avaliações…</p></article>';const profile=data.profiles.find(p=>p.id===card.dataset.profileId);const result=await api('/api/team/'+encodeURIComponent(card.dataset.profileId)+'/ratings');panel.innerHTML='<article class="card"><h3>Histórico de '+esc(profile?.name||'atendente')+'</h3>'+(result.ratings.length?'<div class="ratingHistory">'+result.ratings.map(r=>'<p><b>'+esc(r.contact_name||r.contact_phone)+'</b> · '+esc(r.protocol||'sem protocolo')+'<br>'+('⭐'.repeat(Number(r.stars)))+' <small>'+esc(new Date(r.created_at).toLocaleString('pt-BR'))+'</small></p>').join('')+'</div>':'<p class="muted">Nenhum atendimento avaliado ainda.</p>')+'</article>';});
+  } else if (type === 'tickets') {
+    const tickets=(await api('/api/robot-tickets')).tickets||[];
+    const rows=tickets.length?tickets.map(ticket=>'<tr><td>'+esc(ticket.protocol||'—')+'</td><td>'+esc(ticket.contact_name||ticket.contact_phone||'Cliente')+'</td><td>'+esc(ticket.kind==='no_connection'?'Sem conexão':'Lentidão')+'</td><td><span class="tag">'+esc(ticket.sgp_confirmed?'Aberto no SGP':'Pendente')+'</span></td><td>'+esc(new Date(ticket.created_at).toLocaleString('pt-BR'))+'</td></tr>').join(''):'<tr><td colspan="5" class="muted">Nenhum chamado aberto pelo robô.</td></tr>';
+    app.innerHTML=shell('<section class="settings"><div class="settingsHead"><div><h2>Chamados</h2><p class="muted">Solicitações técnicas abertas automaticamente pelo robô no SGP.</p></div><button class="btn subtle" id="back">Voltar</button></div><article class="card"><table class="queueTable"><thead><tr><th>Protocolo</th><th>Cliente</th><th>Motivo</th><th>SGP</th><th>Abertura</th></tr></thead><tbody>'+rows+'</tbody></table></article></section>','Chamados');
   } else if (type === 'automations') {
     const flows = (await api('/api/flows')).flows;
     const cards = flows.length ? flows.map(flow => '<article class="card"><span class="tag">' + esc(flow.status === 'published' ? 'ATIVO' : flow.status) + '</span><h3>' + esc(flow.name) + '</h3><p class="muted">Versão publicada: ' + esc(flow.published_version || 'nenhuma') + '</p></article>').join('') : '<article class="card"><h3>Nenhum fluxo cadastrado</h3><p class="muted">Abra o editor visual e configure o atendimento SG Fibra.</p></article>';
