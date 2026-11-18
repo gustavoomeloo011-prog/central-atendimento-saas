@@ -176,6 +176,17 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
     result.output.push({type:'message',text,options:[]});
     if(invoiceLines.length){await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});result.transfer=null;result.finished=true;}
   }
+  const remoteResetNode=version.definition.nodes.find(node=>result.executed.includes(node.id)&&node.title==='Reiniciar ONU');
+  if(remoteResetNode){
+    try{
+      const sgpResult=await sgp.lookup(company,c.contact_phone);
+      const service=(sgpResult.customer?.contracts||[]).flatMap(contract=>contract.services||[]).find(item=>item.type==='internet');
+      await sgp.resetOnu(company,service?.onuId);
+    }catch(error){
+      const notice=result.output.find(item=>item.nodeId===remoteResetNode.id);
+      if(notice)notice.text='Não foi possível reiniciar a ONU remotamente. Desligue o modem da tomada, aguarde 2 minutos e ligue novamente.';
+    }
+  }
   // For a confirmed technical failure, register the corrective occurrence and O.S.
   // in the SGP before closing. Any integration failure leaves the conversation in
   // the support queue so the customer is never told a ticket exists when it does not.
@@ -193,6 +204,17 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
       result.transfer=null;result.finished=true;
     }catch(error){
       result.output.push({type:'message',text:'Não foi possível registrar a solicitação técnica automaticamente. Vou encaminhar você para o suporte no horário comercial.',options:[]});
+    }
+  }
+  const promiseTransfer=/Solicitação de liberação de sinal/i.test(String(transferNode?.title||''));
+  if(result.transfer&&promiseTransfer){
+    try{
+      const sgpResult=await sgp.lookup(company,c.contact_phone);
+      const contract=(sgpResult.customer?.contracts||[]).find(item=>(item.services||[]).some(service=>service.type==='internet'))||sgpResult.customer?.contracts?.[0];
+      const promise=await sgp.createPaymentPromise(company,{customerId:sgpResult.customer?.id,contractId:contract?.id});
+      result.output.push({type:'message',text:`Solicitação registrada no financeiro para liberação até ${promise.paymentDate}. Enviaremos as faturas em aberto e a equipe poderá continuar com você no horário comercial.`,options:[]});
+    }catch(error){
+      result.output.push({type:'message',text:'Não foi possível registrar a liberação automaticamente. Vou encaminhar você para o financeiro no horário comercial.',options:[]});
     }
   }
   if(result.transfer){

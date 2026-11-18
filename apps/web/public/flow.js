@@ -69,9 +69,13 @@ export function sgFibraRobotFlow({supportDepartmentId='',financeDepartmentId='',
 
   const support=add('question','Suporte técnico','Qual problema você está enfrentando?',['Internet lenta','Sem conexão','Outro problema']);
   edge(clientMenu,clientMenu.options[0].id,support);edge(unknownClientMenu,unknownClientMenu.options[0].id,support);
+  const resetConsent=add('question','Autorizar reinício da ONU','Identificamos seu contrato. Posso reiniciar sua ONU remotamente? A internet pode ficar indisponível por cerca de 1 minuto.',['Sim, reiniciar agora','Prefiro reiniciar o modem']);
+  edge(support,support.options[0].id,resetConsent);
+  const remoteReset=add('message','Reiniciar ONU','Solicitação de reinício enviada. Aguarde cerca de 1 minuto para a conexão voltar.');
+  edge(resetConsent,resetConsent.options[0].id,remoteReset);
   const restart=add('message','Reiniciar modem','Vamos tentar um procedimento rápido: desligue o modem da tomada, aguarde 2 minutos e ligue novamente. Espere as luzes estabilizarem.');
-  edge(support,support.options[0].id,restart);
-  const check=add('question','Confirmar conexão','A conexão voltou ao normal?',['Sim','Não']);next(restart,check);
+  edge(resetConsent,resetConsent.options[1].id,restart);
+  const check=add('question','Confirmar conexão','A conexão voltou ao normal?',['Sim','Não']);next(remoteReset,check);next(restart,check);
   finish(check,'Conexão restabelecida','Que bom! Se a lentidão voltar, pode chamar a gente novamente.',check.options[0].id);
   transfer(check,'Lentidão continua',supportDepartmentId,'Vou encaminhar o caso para o suporte técnico.',check.options[1].id);
   transfer(support,'Sem conexão',supportDepartmentId,'Vou encaminhar o caso de falta de conexão para o suporte técnico.',support.options[1].id);

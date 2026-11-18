@@ -17,7 +17,7 @@ export function customerSummary(customer) {
       items: open.map(t => ({ id: t.id, contractId: t.clientecontrato_id, dueDate: t.dataVencimento,
         overdue: Number(t.diasAtraso)>0 || isOverdue(t.dataVencimento), amount: numeric(t.valorCorrigido ?? t.valor) })) } : null,
     contracts: (customer.contratos || []).map(c => ({ id: c.id, status: c.status,
-      services: (c.servicos || []).map(s => ({ id: s.id, type: s.tipo, plan: s.plano?.descricao || null,
+      services: (c.servicos || []).map(s => ({ id: s.id, onuId: s.onu?.id || s.onu_id || null, type: s.tipo, plan: s.plano?.descricao || null,
         online: null, rxDbm: signal(s.onu?.rx), txDbm: signal(s.onu?.tx),
         // The API does not provide a measurement timestamp. Do not call it live telemetry.
         signalMeasuredAt: null, source: 'SGP — último sinal armazenado' })) }))
@@ -109,7 +109,29 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     if(![302,303].includes(saved.status))throw Error('O SGP não confirmou a abertura da solicitação.');
     return {opened:true};
   }
-  return { async invoice(companyId, invoiceId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId,cfg); }, async openSlowConnectionTicket(companyId,payload) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Integração SGP não configurada para abrir solicitação.'); return openOccurrence(payload,cfg); }, async lookup(companyId, value) {
+  async function createPaymentPromise(payload,cfg) {
+    const customerId=String(payload.customerId||''),contractId=String(payload.contractId||'');
+    if(!/^\d+$/.test(customerId)||!/^\d+$/.test(contractId))throw Error('Contrato insuficiente para registrar a promessa no SGP.');
+    const session=await panelSession(cfg),formUrl=new URL(`/admin/financeiro/promessapagamento/cliente/${customerId}/add/`,session.base);
+    const form=await fetcher(formUrl,{headers:{Cookie:session.cookies(),Accept:'text/html'},redirect:'manual',signal:AbortSignal.timeout(15000)}),html=await form.text();
+    if(!form.ok||/id_username|accounts\/login/i.test(html))throw Error('O SGP não autorizou a promessa de pagamento.');
+    const csrf=html.match(/name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)/)?.[1]||html.match(/name='csrfmiddlewaretoken' value='([^']+)/)?.[1];
+    if(!csrf)throw Error('O formulário de promessa do SGP não retornou a proteção necessária.');
+    const tomorrow=new Date(clock()+24*60*60*1000),date=[String(tomorrow.getDate()).padStart(2,'0'),String(tomorrow.getMonth()+1).padStart(2,'0'),tomorrow.getFullYear()].join('/');
+    const values={csrfmiddlewaretoken:csrf,cobranca:contractId,data_pagamento:date,observacao:'Promessa de pagamento solicitada pelo FlowChat/WhatsApp.',liberarservico:'on'};
+    const saved=await fetcher(formUrl,{method:'POST',headers:{Cookie:session.cookies(),Referer:formUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(values),redirect:'manual',signal:AbortSignal.timeout(20000)});
+    if(![302,303].includes(saved.status))throw Error('O SGP não confirmou a promessa de pagamento.');
+    return {created:true,paymentDate:date};
+  }
+  async function resetOnu(onuId,cfg) {
+    if(!/^\d+$/.test(String(onuId||'')))throw Error('ONU não identificada no contrato do cliente.');
+    const session=await panelSession(cfg),url=new URL(`/admin/network/onu/${onuId}/reset/`,session.base);
+    const response=await fetcher(url,{headers:{Cookie:session.cookies(),Referer:new URL(`/admin/network/onu/${onuId}/detail/`,session.base).toString(),Accept:'application/json,text/html'},redirect:'manual',signal:AbortSignal.timeout(20000)});
+    const result=await response.text();
+    if(!response.ok||/id_username|accounts\/login/i.test(result))throw Error('O SGP não confirmou o reinício da ONU.');
+    return {reset:true};
+  }
+  return { async invoice(companyId, invoiceId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId,cfg); }, async openSlowConnectionTicket(companyId,payload) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Integração SGP não configurada para abrir solicitação.'); return openOccurrence(payload,cfg); }, async createPaymentPromise(companyId,payload) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Integração SGP não configurada para registrar promessa.'); return createPaymentPromise(payload,cfg); }, async resetOnu(companyId,onuId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Integração SGP não configurada para reiniciar ONU.'); return resetOnu(onuId,cfg); }, async lookup(companyId, value) {
     // A global integration belongs exclusively to its explicitly configured tenant.
     const custom=await configProvider(companyId),cfg={...env,...custom};
     if (env.SGP_COMPANY_ID && !custom.SGP_BASE_URL && companyId !== env.SGP_COMPANY_ID) return { status: 'not_configured' };
