@@ -320,7 +320,11 @@ async function handle(request, response) {
           await applyStoredMetaEdit(tx,company,providerId);
           if(media?.id&&/^\d+$/.test(String(media.id)))await tx.query('update public.messages set attachment_path=$1,attachment_type=$2,attachment_name=$3 where company_id=$4 and provider_message_id=$5',[`meta:${media.id}`,media.mime_type||'application/octet-stream',media.filename||message.type,company,providerId]);
           await tx.query('update public.conversations set updated_at=now() where company_id=$1 and id=$2', [company, c.id]);
-          if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'){
+          // The Cloud API is the primary transport. It must obey the same full-robot
+          // schedule as the Baileys connector; previously only the connector path did.
+          const robotSettings=await tx.one('select full_robot_enabled,full_robot_start,full_robot_end,full_robot_timezone from public.automation_settings where company_id=$1',[company]).catch(()=>null);
+          const robotInWindow=fullRobotActive(robotSettings);
+          if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'&&robotInWindow){
             const flowInput=inbound?.kind==='option'?inbound:(inbound?.value||text);
             const graphReply=await executePublishedFlow(tx,company,c,flowInput,initialVariablesByProvider.get(providerId)||{});
             if(inbound?.kind==='option'&&graphReply?.selectedOption)await tx.query('update public.messages set body=$1 where company_id=$2 and provider_message_id=$3',[graphReply.selectedOption,company,providerId]);
@@ -329,6 +333,18 @@ async function handle(request, response) {
               const messageId=randomUUID(),outboxId=randomUUID(),historyBody=formatNumberedOptions(delivery.text,delivery.options),messageTimestamp=Number(message.timestamp),receivedAt=Number.isFinite(messageTimestamp)&&messageTimestamp>0?messageTimestamp*1000:Date.now(),interactive={options:delivery.options||[],nodeId:delivery.nodeId||'',flowVersionId:delivery.flowVersionId||'',windowExpiresAt:new Date(receivedAt+24*60*60*1000).toISOString()};
               await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,historyBody]);
               await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body,interactive_payload) values($1,$2,$3,$4,$5,$6,$7) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,String(delivery.text||''),interactive]);
+            }
+          }else if(provider==='meta'&&!inbound?.unsupported&&!c.assigned_profile_id&&c.status!=='closed'&&!robotInWindow){
+            // Outside the configured full-robot period, retain the arrival order in the
+            // human queue. Send this notice only on the first message in the wait state.
+            const wasWaiting=c.status==='waiting';
+            await tx.query("update public.conversations set status='waiting',human_started_at=coalesce(human_started_at,now()),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+            if(!wasWaiting){
+              const ahead=await tx.one("select count(*)::int count from public.conversations where company_id=$1 and status='waiting' and assigned_profile_id is null and id<>$2 and coalesce(human_started_at,created_at)<now()",[company,c.id]);
+              const queueText=`Recebemos sua mensagem. Nossa equipe retornará no horário comercial. Há ${Math.max(0,Number(ahead?.count||0))} pessoa(s) na sua frente.`;
+              const messageId=randomUUID(),outboxId=randomUUID();
+              await tx.query("insert into public.messages(id,company_id,conversation_id,body,direction,delivery_status) values($1,$2,$3,$4,'outbound','pending')",[messageId,company,c.id,queueText]);
+              await tx.query("insert into public.whatsapp_outbox(id,company_id,conversation_id,idempotency_key,to_phone,body,interactive_payload) values($1,$2,$3,$4,$5,$6,$7) on conflict(company_id,idempotency_key) do nothing",[outboxId,company,c.id,`meta-message:${messageId}`,phone,queueText,{options:[],nodeId:'full-robot-off-hours',flowVersionId:'system',windowExpiresAt:new Date(Date.now()+24*60*60*1000).toISOString()}]);
             }
           }
           processed++;
