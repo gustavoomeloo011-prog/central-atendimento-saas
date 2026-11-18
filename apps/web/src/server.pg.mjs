@@ -176,6 +176,25 @@ async function executePublishedFlow(tx,company,c,input,initialVariables={}){
     result.output.push({type:'message',text,options:[]});
     if(invoiceLines.length){await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});result.transfer=null;result.finished=true;}
   }
+  // For a confirmed technical failure, register the corrective occurrence and O.S.
+  // in the SGP before closing. Any integration failure leaves the conversation in
+  // the support queue so the customer is never told a ticket exists when it does not.
+  const transferNode=version.definition.nodes.find(node=>result.executed.includes(node.id)&&node.type==='transfer');
+  const technicalTransfer=/Lentidão continua|Sem conexão|Outro problema técnico/i.test(String(transferNode?.title||''));
+  if(result.transfer&&technicalTransfer){
+    try{
+      const sgpResult=await sgp.lookup(company,c.contact_phone);
+      const contract=(sgpResult.customer?.contracts||[]).find(item=>(item.services||[]).some(service=>service.type==='internet'));
+      const service=contract?.services?.find(item=>item.type==='internet');
+      await sgp.openSlowConnectionTicket(company,{customerId:sgpResult.customer?.id,contractId:contract?.id,serviceId:service?.id,description:result.variables?.lastReply});
+      await tx.query("update public.conversations set status='closed',assigned_profile_id=null,closed_at=now(),updated_at=now() where company_id=$1 and id=$2",[company,c.id]);
+      result.output.push({type:'message',text:'Registramos sua solicitação técnica no SGP. Nossa equipe retornará no horário comercial.',options:[]});
+      result.output.push({type:'message',text:'Atendimento encerrado. Como você avalia este atendimento?',options:[{id:'rating_1',label:'⭐ 1 estrela'},{id:'rating_2',label:'⭐ 2 estrelas'},{id:'rating_3',label:'⭐ 3 estrelas'}]});
+      result.transfer=null;result.finished=true;
+    }catch(error){
+      result.output.push({type:'message',text:'Não foi possível registrar a solicitação técnica automaticamente. Vou encaminhar você para o suporte no horário comercial.',options:[]});
+    }
+  }
   if(result.transfer){
     const ahead=await tx.one("select count(*)::int count from public.conversations where company_id=$1 and status='waiting' and assigned_profile_id is null and id<>$2 and coalesce(human_started_at,created_at)<now()",[company,c.id]);
     const count=Math.max(0,Number(ahead?.count||0));

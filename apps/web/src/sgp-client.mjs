@@ -80,7 +80,36 @@ export function createSgpClient({ env = process.env, fetcher = fetch, clock = Da
     const line=candidates.find(item=>item.digits.length===47||item.digits.length===48);
     return {invoiceId:id,barcode:line?.raw||null,link:url.toString()};
   }
-  return { async invoice(companyId, invoiceId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId,cfg); }, async lookup(companyId, value) {
+  // SGP's admin actions are server-rendered Django forms. Keep this helper private,
+  // preserve CSRF/cookies, and never return their HTML or credentials to the caller.
+  async function panelSession(cfg) {
+    const base=new URL(cfg.SGP_BASE_URL), jar=new Map();
+    const capture=response=>{for(const value of response.headers.getSetCookie?.()||[]){const pair=value.split(';')[0],at=pair.indexOf('=');if(at>0)jar.set(pair.slice(0,at),pair.slice(at+1));}};
+    const cookies=()=>[...jar].map(([key,value])=>`${key}=${value}`).join('; ');
+    const loginUrl=new URL('/accounts/login/',base);
+    const login=await fetcher(loginUrl,{redirect:'manual',signal:AbortSignal.timeout(15000)});capture(login);
+    const html=await login.text(),csrf=html.match(/name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)/)?.[1]||html.match(/name='csrfmiddlewaretoken' value='([^']+)/)?.[1]||jar.get('csrftoken');
+    if(!csrf)throw Error('Não foi possível iniciar a sessão administrativa do SGP.');
+    const authenticated=await fetcher(loginUrl,{method:'POST',headers:{Cookie:cookies(),Referer:loginUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({username:cfg.SGP_USERNAME,password:cfg.SGP_PASSWORD,csrfmiddlewaretoken:csrf,next:'/admin/'}),redirect:'manual',signal:AbortSignal.timeout(15000)});capture(authenticated);
+    if(![302,303].includes(authenticated.status))throw Error('O SGP recusou a autenticação administrativa.');
+    return {base,cookies};
+  }
+  async function openOccurrence(payload,cfg) {
+    const customerId=String(payload.customerId||''),contractId=String(payload.contractId||''),serviceId=String(payload.serviceId||'');
+    if(!/^\d+$/.test(customerId)||!/^\d+$/.test(contractId)||!/^\d+$/.test(serviceId))throw Error('Dados de contrato insuficientes para abrir a solicitação no SGP.');
+    const session=await panelSession(cfg),formUrl=new URL(`/admin/atendimento/cliente/${customerId}/ocorrencia/add/`,session.base);
+    const form=await fetcher(formUrl,{headers:{Cookie:session.cookies(),Accept:'text/html'},redirect:'manual',signal:AbortSignal.timeout(15000)});
+    const html=await form.text();
+    if(!form.ok||/id_username|accounts\/login/i.test(html))throw Error('O SGP não autorizou a abertura da solicitação.');
+    const csrf=html.match(/name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)/)?.[1]||html.match(/name='csrfmiddlewaretoken' value='([^']+)/)?.[1];
+    if(!csrf)throw Error('O formulário de ocorrência do SGP não retornou a proteção necessária.');
+    const date=new Date(clock()).toLocaleString('sv-SE',{timeZone:'America/Sao_Paulo'}).replace('T',' ').slice(0,16);
+    const values={csrfmiddlewaretoken:csrf,clientecontrato:contractId,servico:serviceId,setor:'1',tipo:'3',metodo:'5',status:'0',conteudo:`Aberto pelo FlowChat/WhatsApp. ${String(payload.description||'Cliente relata lentidão após reinício da ONU.').slice(0,1800)}`,observacoes:'Solicitação registrada automaticamente pelo atendimento via WhatsApp.',data_agendamento:date,os:'on'};
+    const saved=await fetcher(formUrl,{method:'POST',headers:{Cookie:session.cookies(),Referer:formUrl.toString(),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(values),redirect:'manual',signal:AbortSignal.timeout(20000)});
+    if(![302,303].includes(saved.status))throw Error('O SGP não confirmou a abertura da solicitação.');
+    return {opened:true};
+  }
+  return { async invoice(companyId, invoiceId) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Consulta SGP não configurada para esta empresa.'); return invoiceDocument(invoiceId,cfg); }, async openSlowConnectionTicket(companyId,payload) { const cfg={...env,...await configProvider(companyId)}; if (!cfg.SGP_BASE_URL || !cfg.SGP_USERNAME || !cfg.SGP_PASSWORD) throw Error('Integração SGP não configurada para abrir solicitação.'); return openOccurrence(payload,cfg); }, async lookup(companyId, value) {
     // A global integration belongs exclusively to its explicitly configured tenant.
     const custom=await configProvider(companyId),cfg={...env,...custom};
     if (env.SGP_COMPANY_ID && !custom.SGP_BASE_URL && companyId !== env.SGP_COMPANY_ID) return { status: 'not_configured' };
